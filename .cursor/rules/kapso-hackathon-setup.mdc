@@ -20,8 +20,8 @@ When the user wants to **run the project**, **set up their environment**, or **g
 
 - **`CONTRIBUTING.md` is optional**—teams may follow it or not.
 - **Two valid flows:**
-  - **Branches on the shared repo:** create a branch, PR to `main`, merge often.
-  - **Fork:** GitHub **Fork** → clone the fork → `git remote add upstream <starter-repo-url>` → work on a branch on the fork → open PRs to upstream `main`.
+  - **Branches on the shared repo:** each **team** has **one branch** from `main` (e.g. `team-<slug>`) that they own; teammates push there; PR to `main` when landing work. See **`CONTRIBUTING.md`**.
+  - **Fork:** GitHub **Fork** → clone the fork → `git remote add upstream <starter-repo-url>` → same **one team branch** model on the fork → open PRs to upstream `main`.
 - If the user asks how to fork or merge upstream, point them to **`CONTRIBUTING.md`** and the README table; offer to run `git remote -v` / `git fetch upstream` for them if they paste output.
 
 ## Goal

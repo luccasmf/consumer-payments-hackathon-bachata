@@ -4,22 +4,49 @@
 
 This repo is meant for **fast collaboration** while many people **vibe-code with Cursor Agent**. The goal is to ship a working WhatsApp demo without merge-conflict chaos.
 
-## Default model: one repo, branches, small pull requests
+## Default model: one team branch from `main` (you own it)
 
-We recommend **one shared repository** when everyone can push to the same repo (simplest for class / org hackathons).
+When everyone can push to the **same** GitHub repo, we recommend:
 
-- Each teammate works on a **short-lived branch**.
-- Open **small pull requests** and merge to `main` **often** (multiple times per day is fine).
-- **Pull `main` before you start** each coding session to reduce conflicts.
+- **Each hackathon team has exactly one long-lived branch** created from `main`. **That branch is yours**—do all day-to-day work there so you don’t collide with other teams on `main`.
+- **Name it after your team** so it’s obvious who owns it, e.g. `team-bananas`, `team-ledger`, `team-payments-cat`.
+- **All teammates** check out **that same branch**, pull before coding, commit, and push to it.
+- **Merge to `main`** when you have something stable: open a **pull request** from your team branch → `main` (small PRs are still better than one giant merge at the deadline).
+- **Stay current with `main`:** regularly merge `main` into your team branch (`git checkout team-…` then `git merge main`) so you don’t drift.
 
-### Branch naming
+### Create your team branch (once per team)
 
-Use a prefix so it’s obvious who owns the work:
+Pick a **single slug** (lowercase, hyphens OK). One person runs:
 
-- `team-<name>/<short-topic>` — e.g. `team-banana/fix-payment-reply`
-- or `<your-name>/<short-topic>` — e.g. `alex/add-receipt-parser`
+```bash
+git checkout main
+git pull origin main
+git checkout -b team-<your-slug>
+git push -u origin team-<your-slug>
+```
 
-Keep topics **narrow** (one behavior / one flow) so PRs stay reviewable.
+Everyone else:
+
+```bash
+git fetch origin
+git checkout team-<your-slug>
+```
+
+### Day-to-day on the team branch
+
+```bash
+git checkout team-<your-slug>
+git pull origin team-<your-slug>    # or: git pull while on that branch
+# … make changes …
+git add -A && git commit -m "Describe the change"
+git push origin team-<your-slug>
+```
+
+**Avoid** each person creating their own unrelated long-lived branch unless organizers say otherwise—use **one** team branch so ownership stays clear.
+
+### Optional: tiny local branches for spikes
+
+If someone needs a quick experiment, they can use `team-<slug>/<topic>` and merge it back into the team branch via PR—but the **canonical line of work** should still be **the team’s main branch** above.
 
 ## Alternative: fork the starter (optional)
 
@@ -35,12 +62,14 @@ Use a **fork** when you want isolation (e.g. only your fork is writable, or you 
    ```bash
    git remote add upstream git@github.com:alex-felixpagos/consumer-payments-hackathon.git
    ```
-4. Create a branch, commit, and push to **your fork** (`origin`):
+4. Create **your team’s one branch** from `main` on the fork and push:
    ```bash
-   git checkout -b team/my-feature
-   git push -u origin team/my-feature
+   git checkout main
+   git pull upstream main
+   git checkout -b team-<your-slug>
+   git push -u origin team-<your-slug>
    ```
-5. Open a **pull request** from your fork’s branch → **`main`** on the upstream repo (unless organizers say otherwise).
+5. Open **pull requests** from your fork’s `team-<slug>` → **`main`** on the upstream repo when you want to land work (unless organizers say otherwise).
 6. To sync new changes from the starter later:
    ```bash
    git fetch upstream
@@ -50,7 +79,7 @@ Use a **fork** when you want isolation (e.g. only your fork is writable, or you 
 
 ## Pull request etiquette
 
-- **Keep PRs small:** one vertical slice (e.g., “handle ‘pay’ intent in `app/bot.py`”) beats a giant refactor.
+- **Keep PRs small:** one vertical slice (e.g., “handle ‘pay’ intent in `app/bot.py`”) beats a giant refactor—even when the source branch is your team branch.
 - **Title:** short imperative, e.g. “Add payment confirmation reply”.
 - **Description (optional but helpful):** what changed + how you tested (WhatsApp message, `/health`, etc.).
 - If the agent rewrote a lot by accident, **split the work** into smaller commits/PRs before merging.
@@ -69,7 +98,7 @@ Use a **fork** when you want isolation (e.g. only your fork is writable, or you 
 ## When two people edit the same files
 
 - **Communicate** in your team channel before large edits to `app/bot.py` or `app/services/kapso_client.py`.
-- Prefer **merging `main` into your branch** (or rebasing onto `main`) right before you push, so conflicts are fixed while the context is fresh.
+- Prefer **merging `main` into your team branch** (or rebasing onto `main`) right before you push, so conflicts are fixed while the context is fresh.
 
 ## Organizers (optional GitHub settings)
 
