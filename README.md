@@ -1,5 +1,3 @@
-
-
 **Félix conversational hackathon**  
 *Consumer payments · WhatsApp starter*
 
@@ -23,7 +21,7 @@ Think of this starter as your launchpad: focus your energy on the conversation, 
 
 ---
 
-## Project requirements ✅
+## IMPORTANT - Project requirements ✅ 
 
 To be considered a successful hackathon submission, teams should follow these rules:
 
@@ -41,7 +39,7 @@ To be considered a successful hackathon submission, teams should follow these ru
 
 ---
 
-### Using Cursor? 🤖
+# Initial Setup (Start here ⬇️)
 
 Ask the agent: *“Help me set up `.env`, Kapso, ngrok, and start the server.”*  
 The project loads **`.cursor/rules/kapso-hackathon-setup.mdc`** so everyone gets the same step-by-step path—including teammates who rarely touch the terminal.
@@ -60,51 +58,94 @@ The rule is auto-applied in this project, so you do **not** need to manually loa
 
 ---
 
-## Quick start
+## First-time setup (detailed) 🧭
+
+If you have never used Kapso or ngrok before, follow these steps in order.
+
+### 1) Local Python setup 🐍
+
+From the project root:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env               # then fill values
+cp .env.example .env
+```
+
+If `python3` is missing, install Python 3.11+ from [python.org](https://www.python.org/downloads/).
+
+### 2) Create your Kapso account + sandbox 🔐
+
+1. Go to [kapso.ai](https://kapso.ai/) and create/sign in to your account.
+2. Open the WhatsApp **sandbox** setup area.
+3. Add your personal phone number as an allowed test recipient (if prompted).
+4. Copy these values from Kapso into your local `.env`:
+  - `KAPSO_API_KEY`
+  - `KAPSO_PHONE_NUMBER_ID`
+5. Pick your own secret verify token and add it to `.env`:
+  - `KAPSO_VERIFY_TOKEN=your-secret-token`
+
+### 3) Install and configure ngrok (required) 🌍
+
+Kapso needs a public HTTPS URL to send webhooks to your laptop.
+
+1. Create a free account at [ngrok.com](https://ngrok.com/).
+2. Install ngrok:
+  - macOS (Homebrew): `brew install ngrok/ngrok/ngrok`
+  - Other OS: use [ngrok download](https://ngrok.com/download)
+3. In the ngrok dashboard, copy your authtoken and run:
+
+```bash
+ngrok config add-authtoken YOUR_TOKEN_HERE
+```
+
+### 4) Start the app + tunnel (2 terminals) 🖥️
+
+**Terminal 1 (API):**
+
+```bash
+source .venv/bin/activate
 uvicorn app.main:app --reload --port 8000
 ```
 
-- Docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- Health: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
-
-## Kapso account + sandbox setup (required) 🛠️
-
-Before testing messages, each team member should do this in Kapso:
-
-1. Create a Kapso account at [kapso.ai](https://kapso.ai/) and open the dashboard.
-2. Open/create a **WhatsApp sandbox** configuration.
-3. Add your personal phone number as an allowed sandbox/test recipient.
-4. Copy these values from Kapso into `.env`:
-  - `KAPSO_API_KEY`
-  - `KAPSO_PHONE_NUMBER_ID`
-5. Pick your own verify token (any secret phrase) and set:
-  - `.env` → `KAPSO_VERIFY_TOKEN=<your token>`
-  - Kapso webhook verify token field → same exact token
-6. In webhook events, select **Message received** (enough for this starter). Leave debouncing off unless you explicitly want batching.
-
-## ngrok (required) 🌍
+**Terminal 2 (ngrok):**
 
 ```bash
 ngrok http 8000
 ```
 
-Use the HTTPS host from ngrok to set Kapso webhook URL:
+Copy the HTTPS ngrok host (example: `https://abcd-123.ngrok-free.app`).
 
-`https://<your-ngrok-host>/webhooks/whatsapp`
+### 5) Register webhook in Kapso 📬
 
-## Kapso setup notes 🧠
+In Kapso “Add Webhook Endpoint” (or similar):
 
-- Use your **sandbox** config.
-- Copy `KAPSO_API_KEY` and `KAPSO_PHONE_NUMBER_ID` into `.env`.
-- `KAPSO_VERIFY_TOKEN` in `.env` must match Kapso verify token field.
-- In webhook events, **Message received** is sufficient for this starter.
-- Leave message debouncing off unless you intentionally want batching.
+- **Endpoint URL:** `https://<your-ngrok-host>/webhooks/whatsapp`
+  - Must include the full `/webhooks/whatsapp` path (no truncation).
+- **Verify token:** must exactly match `KAPSO_VERIFY_TOKEN` in `.env`.
+- **Webhook type:** use what sandbox allows (usually **Kapso (events)**).
+- **Events:** enable **Message received**.
+- **Message debouncing:** keep it **off** for easier debugging.
+
+### 6) Quick checks ✅
+
+- Health check: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+- Swagger docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- API key smoke test:
+
+```bash
+curl -s http://127.0.0.1:8000/api/kapso/account
+```
+
+If you see JSON (including `{"data":[]}`), your key is valid.
+
+### 7) Common first-time issues 🧯
+
+- **No inbound messages:** check both terminals are running, and Kapso URL is exactly `https://<ngrok-host>/webhooks/whatsapp`.
+- **ngrok restarted:** free ngrok URL changed; update webhook URL in Kapso.
+- **Verify token failed:** Kapso verify token and `.env` `KAPSO_VERIFY_TOKEN` do not match exactly.
+- **No WhatsApp delivery:** confirm your phone was added as a sandbox recipient in Kapso.
 
 ## Demo outbound message 🎯
 
