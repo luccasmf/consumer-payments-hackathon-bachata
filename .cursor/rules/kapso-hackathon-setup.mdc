@@ -1,0 +1,83 @@
+---
+description: Hand-hold non-technical users through starting the bot, .env, Kapso sandbox, and ngrok
+alwaysApply: true
+---
+
+# Hackathon: start the WhatsApp bot (Kapso + ngrok)
+
+When the user wants to **run the project**, **set up their environment**, or **get Kapso working**, treat them as potentially non-technical. Guide step-by-step; offer to **run terminal commands for them** in this repo (venv, pip, uvicorn, ngrok).
+
+## Goal
+
+Two processes must run locally: **(1) the API** and **(2) ngrok**. Kapso sends webhooks to the **public HTTPS URL** ngrok provides, which forwards to `localhost`.
+
+## Order of operations
+
+1. **Python environment**
+   - From the project root: create a venv, activate it, `pip install -r requirements.txt`.
+   - If `python3` is missing, tell them to install Python 3.11+ from [python.org](https://www.python.org/downloads/) or `brew install python@3.12` on macOS.
+
+2. **`.env` file**
+   - Copy `.env.example` → `.env` (create `.env` if copying isn’t possible).
+   - They must fill at least: `KAPSO_API_KEY`, `KAPSO_PHONE_NUMBER_ID`, `KAPSO_VERIFY_TOKEN`.
+   - Plain-language names: **API key** and **phone number ID** come from the **Kapso dashboard** → **sandbox WhatsApp configuration**. **Verify token** is a **secret phrase they invent**; the *same* phrase is entered in Kapso when registering the webhook.
+   - Optional: `KAPSO_WEBHOOK_SECRET` if Kapso shows a webhook signing secret.
+
+3. **Kapso dashboard (sandbox)**
+
+   They should have or create a Kapso account, open **sandbox** WhatsApp settings, and:
+   - Add **their own phone number** as a test/sandbox recipient when the flow asks.
+   - Copy **`KAPSO_API_KEY`** and **`KAPSO_PHONE_NUMBER_ID`** into `.env`.
+   - Pick a **`KAPSO_VERIFY_TOKEN`** string, save it in `.env`, and use that exact token in Kapso’s webhook / verify-token field.
+
+4. **Start the API** (terminal 1)
+
+   ```bash
+   uvicorn app.main:app --reload --port 8000
+   ```
+
+   Default port is `8000` (must match ngrok). If `PORT` in `.env` differs, use that port for uvicorn and ngrok.
+
+5. **ngrok (required)** (terminal 2)
+
+   One-time: [ngrok sign-up](https://ngrok.com/) → install (e.g. `brew install ngrok/ngrok/ngrok` on macOS) → `ngrok config add-authtoken <token>` from the dashboard.
+
+   Every session:
+
+   ```bash
+   ngrok http 8000
+   ```
+
+   Copy the **https** forwarding host (e.g. `https://abcd-123.ngrok-free.app`). Webhook URL for Kapso:
+
+   `https://<that-host>/webhooks/whatsapp`  
+   (no trailing slash)
+
+6. **Kapso webhook in the dashboard** (“Add Webhook Endpoint” or similar)
+
+   - **Endpoint URL:** Full HTTPS URL: `https://<ngrok-host>/webhooks/whatsapp` — **no truncation** (a path like `.../webhooks/wh` is wrong and will fail).
+   - **Verify token:** Must match `KAPSO_VERIFY_TOKEN` in `.env` exactly.
+   - **Webhook type:** Sandbox configs often only allow **Kapso (events)**; use what the dashboard offers for sandbox.
+   - **Events:** Enabling **Message received** (“when a new message arrives”) is **sufficient** for this repo (`app/bot.py`). Other event types are optional; if enabled later, code may need to ignore non-message payloads.
+   - **Message debouncing:** Leave **off** unless the team wants batched messages (simpler hackathon debugging when off).
+
+   Complete setup so Kapso successfully **GET**s the verification challenge on that URL.
+
+7. **Quick checks**
+
+   - Browser: `http://127.0.0.1:8000/health` should respond.
+   - Optional demo send (**no ngrok**): from repo root, `python -m app.send_demo_message --to "+1…"` — message appears on their WhatsApp from the Kapso number (use their sandbox‑registered phone in E.164).
+   - If WhatsApp replies don’t trigger the bot: confirm both terminals are running, ngrok URL in Kapso is **current** (free ngrok URLs change after restart), and the path is exactly **`/webhooks/whatsapp`** (not cut off in the Kapso URL field).
+
+## How you (the agent) should behave
+
+- Prefer **numbered steps** and **one action at a time**.
+- Use **plain language** for Kapso fields; map them to `.env` variable names when they’re ready.
+- If something fails, ask for the **exact error message** or **last 20 lines of terminal output**.
+- Do **not** assume they know git, venv, or ngrok; briefly explain *why* each step exists in one sentence when helpful.
+
+## Repo map (for answers)
+
+- **`app/bot.py`** — when a message is received (`handle_inbound`), default demo replies *I just received: …Lets start building 🚀* using parsed text when possible.
+- **`app/send_demo_message.py`** — one-off outbound text (`python -m app.send_demo_message --to "+1…"` from repo root).
+- **`README.md`** — longer reference for ngrok and Kapso links.
