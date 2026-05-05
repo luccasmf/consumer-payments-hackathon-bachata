@@ -20,6 +20,21 @@ When the user wants to **run the project**, **set up their environment**, or **g
 
 Two processes must run locally: **(1) the API** and **(2) ngrok**. Kapso sends webhooks to the **public HTTPS URL** ngrok provides, which forwards to `localhost`.
 
+### Listen for inbound WhatsApp messages (both terminals)
+
+To **receive** user messages and hit `app/bot.py`, **uvicorn and ngrok must both be running at the same time** after Kapso’s webhook points at your ngrok URL:
+
+1. **Terminal 1 — API (listens on localhost):** activate the venv, then start Uvicorn:
+   ```bash
+   source .venv/bin/activate   # Windows: .venv\Scripts\activate
+   uvicorn app.main:app --reload --port 8000
+   ```
+2. **Terminal 2 — ngrok (exposes localhost):** tunnel the **same** port as Uvicorn (default `8000`):
+   ```bash
+   ngrok http 8000
+   ```
+If either process stops, Kapso cannot deliver webhooks → no inbound messages. Outbound-only tests (e.g. `python -m app.send_demo_message`) do not need ngrok, but **receiving** replies in the bot always needs **both**.
+
 ## Order of operations
 
 1. **Python environment**
@@ -39,19 +54,20 @@ Two processes must run locally: **(1) the API** and **(2) ngrok**. Kapso sends w
    - Copy **`KAPSO_API_KEY`** and **`KAPSO_PHONE_NUMBER_ID`** into `.env`.
    - Pick a **`KAPSO_VERIFY_TOKEN`** string, save it in `.env`, and use that exact token in Kapso’s webhook / verify-token field.
 
-4. **Start the API** (terminal 1)
+4. **Start the API with Uvicorn** (terminal 1 — keep this window open)
 
    ```bash
+   source .venv/bin/activate   # Windows: .venv\Scripts\activate
    uvicorn app.main:app --reload --port 8000
    ```
 
    Default port is `8000` (must match ngrok). If `PORT` in `.env` differs, use that port for uvicorn and ngrok.
 
-5. **ngrok (required)** (terminal 2)
+5. **Start ngrok** (terminal 2 — keep this window open; required for inbound webhooks)
 
    One-time: [ngrok sign-up](https://ngrok.com/) → install (e.g. `brew install ngrok/ngrok/ngrok` on macOS) → `ngrok config add-authtoken <token>` from the dashboard.
 
-   Every session:
+   Every session (after Uvicorn is running on the same port):
 
    ```bash
    ngrok http 8000
