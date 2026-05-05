@@ -30,6 +30,8 @@ To be considered a successful hackathon submission, teams should follow these ru
 2. **Everyone contributes code:** Every teammate must push at least one change to the repository.
 3. **Make it fun:** Build something that excites your team and is genuinely enjoyable to demo.
 
+**How to collaborate:** see **[CONTRIBUTING.md](CONTRIBUTING.md)** (branches, small PRs, secrets).
+
 ---
 
 ### What you get ✨
