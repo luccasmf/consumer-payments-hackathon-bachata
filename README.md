@@ -51,26 +51,61 @@ Step-by-step fork commands live in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ---
 
-# Initial Setup (Start here ⬇️)
+## Start here: Cursor + Kapso hackathon setup 🎯
 
-Ask the agent: *“Help me set up `.env`, Kapso, ngrok, and start the server.”*  
-The project loads **`.cursor/rules/kapso-hackathon-setup.mdc`** so everyone gets the same step-by-step path—including teammates who rarely touch the terminal.
+**Use Cursor Agent with this repo’s setup rule—that’s the main path we support for hackathon day.**
 
-#### How to use the rule directly
+The project ships an **always-on Cursor rule**: [`.cursor/rules/kapso-hackathon-setup.mdc`](.cursor/rules/kapso-hackathon-setup.mdc). It walks people through the full sequence in order: Python + venv, `.env`, Kapso sandbox keys, **Uvicorn and ngrok** (two terminals), registering the Kapso webhook (`/webhooks/whatsapp`), verification token, event selection, and quick checks.
 
-1. Open Cursor chat in this repo.
-2. Ask for one step at a time (recommended for non-technical teammates).
-3. Use prompts like:
-  - `Walk me through setup and starting the bot`
-  - `Help me fill .env for Kapso sandbox`
-  - `Help me run uvicorn and ngrok`
-  - `Help me configure the Kapso webhook URL and events`
+### What to do
 
-The rule is auto-applied in this project, so you do **not** need to manually load it each time.
+1. Clone or open this repository in **Cursor**.
+2. Open **Chat** and ask the agent to set you up—start broad or go step by step.
+
+**Example prompts:**
+
+| Goal | Paste into Cursor chat |
+|------|-------------------------|
+| Full guided setup | *“Walk me through setup and starting the bot from scratch.”* |
+| Just environment | *“Help me create the venv, install dependencies, and copy `.env.example` to `.env`.”* |
+| Kapso values | *“Help me fill `.env` from my Kapso sandbox dashboard.”* |
+| Run the stack | *“Help me run uvicorn and ngrok on port 8000 in two terminals.”* |
+| Webhook | *“Help me set my Kapso webhook URL and verify token to match `.env`.”* |
+
+You **do not** need to open or paste the `.mdc` file manually—the rule applies automatically in this workspace.
+
+### Not using Cursor?
+
+Use the **[Detailed setup reference](#detailed-setup-reference-manual-checklist)** at the end of this README (same flow, written out as a checklist). You can also pair with a teammate who is using Cursor.
 
 ---
 
-## First-time setup (detailed) 🧭
+## Demo outbound message 🎯
+
+No ngrok required for a one-off send—only a filled `.env` and a sandbox-approved phone:
+
+```bash
+python -m app.send_demo_message --to "+1XXXXXXXXXX"
+```
+
+---
+
+## API routes (quick ref) 🗺️
+
+- `GET /health` — liveness
+- `GET /webhooks/whatsapp` — Kapso/Meta webhook verification
+- `POST /webhooks/whatsapp` — inbound events → `app/bot.py`
+- `POST /api/send-text` — manual outbound (Swagger: `/docs`)
+
+---
+
+**Go build something people can text. Have fun and ship fast ⚡**
+
+---
+
+## Detailed setup reference (manual checklist) 🧭
+
+*This section mirrors what **[`.cursor/rules/kapso-hackathon-setup.mdc`](.cursor/rules/kapso-hackathon-setup.mdc)** covers—use it if you want a printable checklist or you are not using Cursor. Follow the steps in order.*
 
 If you have never used Kapso or ngrok before, follow these steps in order.
 
@@ -93,10 +128,10 @@ If `python3` is missing, install Python 3.11+ from [python.org](https://www.pyth
 2. Open the WhatsApp **sandbox** setup area.
 3. Add your personal phone number as an allowed test recipient (if prompted).
 4. Copy these values from Kapso into your local `.env`:
-  - `KAPSO_API_KEY`
-  - `KAPSO_PHONE_NUMBER_ID`
+   - `KAPSO_API_KEY`
+   - `KAPSO_PHONE_NUMBER_ID`
 5. Pick your own secret verify token and add it to `.env`:
-  - `KAPSO_VERIFY_TOKEN=your-secret-token`
+   - `KAPSO_VERIFY_TOKEN=your-secret-token`
 
 ### 3) Install and configure ngrok (required) 🌍
 
@@ -104,8 +139,8 @@ Kapso needs a public HTTPS URL to send webhooks to your laptop.
 
 1. Create a free account at [ngrok.com](https://ngrok.com/).
 2. Install ngrok:
-  - macOS (Homebrew): `brew install ngrok/ngrok/ngrok`
-  - Other OS: use [ngrok download](https://ngrok.com/download)
+   - macOS (Homebrew): `brew install ngrok/ngrok/ngrok`
+   - Other OS: use [ngrok download](https://ngrok.com/download)
 3. In the ngrok dashboard, copy your authtoken and run:
 
 ```bash
@@ -158,20 +193,3 @@ If you see JSON (including `{"data":[]}`), your key is valid.
 - **ngrok restarted:** free ngrok URL changed; update webhook URL in Kapso.
 - **Verify token failed:** Kapso verify token and `.env` `KAPSO_VERIFY_TOKEN` do not match exactly.
 - **No WhatsApp delivery:** confirm your phone was added as a sandbox recipient in Kapso.
-
-## Demo outbound message 🎯
-
-```bash
-python -m app.send_demo_message --to "+1XXXXXXXXXX"
-```
-
-## Routes 🗺️
-
-- `GET /health`
-- `GET /webhooks/whatsapp` (verification)
-- `POST /webhooks/whatsapp` (inbound events)
-- `POST /api/send-text` (manual outbound)
-
----
-
-**Go build something people can text. Have fun and ship fast ⚡**

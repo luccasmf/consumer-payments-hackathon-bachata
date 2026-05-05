@@ -114,5 +114,5 @@ If either process stops, Kapso cannot deliver webhooks → no inbound messages. 
 
 - **`app/bot.py`** — when a message is received (`handle_inbound`), default demo replies *I just received: …Lets start building 🚀* using parsed text when possible.
 - **`app/send_demo_message.py`** — one-off outbound text (`python -m app.send_demo_message --to "+1…"` from repo root).
-- **`README.md`** — longer reference for ngrok and Kapso links.
+- **`README.md`** — leads with using this Cursor rule for setup; **detailed manual checklist** is at the **end** of the file for non-Cursor users.
 - **`CONTRIBUTING.md`** — optional hackathon Git workflow (branches vs fork, small PRs, no secrets in git).
