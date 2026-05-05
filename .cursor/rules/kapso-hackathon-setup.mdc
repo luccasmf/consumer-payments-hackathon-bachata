@@ -55,11 +55,13 @@ If either process stops, Kapso cannot deliver webhooks → no inbound messages. 
    - Plain-language names: **API key** and **phone number ID** come from the **Kapso dashboard** → **sandbox WhatsApp configuration**. **Verify token** is a **secret phrase they invent**; the *same* phrase is entered in Kapso when registering the webhook.
    - Optional: `KAPSO_WEBHOOK_SECRET` if Kapso shows a webhook signing secret.
 
-3. **Kapso dashboard (sandbox)**
+3. **Kapso dashboard (sandbox only — not production)**
 
-   They should have or create a Kapso account, open **sandbox** WhatsApp settings, and:
-   - Add **their own phone number** as a test/sandbox recipient when the flow asks.
-   - Copy **`KAPSO_API_KEY`** and **`KAPSO_PHONE_NUMBER_ID`** into `.env`.
+   This starter expects Kapso’s **sandbox / test** WhatsApp flow. Warn clearly: **do not** onboard a **production** business number for this hackathon unless organizers explicitly require it.
+   - They should create/sign in to Kapso and open the **Sandbox / test** WhatsApp configuration (labels vary by dashboard).
+   - Add **their own mobile** as the **test / sandbox recipient** when the UI asks—messages from random phones that were never added will fail.
+   - **`KAPSO_PHONE_NUMBER_ID`** is the **WhatsApp Phone Number ID of the sandbox sender** shown in that same config—it is **not** their personal phone number.
+   - Copy **`KAPSO_API_KEY`** and **`KAPSO_PHONE_NUMBER_ID`** from **that same** sandbox screen (not another project tab or production config).
    - Pick a **`KAPSO_VERIFY_TOKEN`** string, save it in `.env`, and use that exact token in Kapso’s webhook / verify-token field.
 
 4. **Start the API with Uvicorn** (terminal 1 — keep this window open)
@@ -102,6 +104,7 @@ If either process stops, Kapso cannot deliver webhooks → no inbound messages. 
    - API key smoke test: `curl -s http://127.0.0.1:8000/api/kapso/account` should return JSON (including `{"data":[]}` for a valid key with no integrations).
    - Optional demo send (**no ngrok**): from repo root, `python -m app.send_demo_message --to "+1…"` — message appears on their WhatsApp from the Kapso number (use their sandbox‑registered phone in E.164).
    - If WhatsApp replies don’t trigger the bot: confirm both terminals are running, ngrok URL in Kapso is **current** (free ngrok URLs change after restart), and the path is exactly **`/webhooks/whatsapp`** (not cut off in the Kapso URL field).
+   - If outbound/inbound to WhatsApp fails for “not allowed” / delivery errors: confirm they used **sandbox test recipient** flow, not production, and that **`KAPSO_PHONE_NUMBER_ID`** matches the **sandbox sender** ID from the same dashboard area as the API key.
 
 ## How you (the agent) should behave
 

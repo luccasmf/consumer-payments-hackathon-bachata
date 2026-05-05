@@ -73,6 +73,7 @@ The project ships an **always-on Cursor rule**: [`.cursor/rules/kapso-hackathon-
 | Kapso values | *“Help me fill `.env` from my Kapso sandbox dashboard.”* |
 | Run the stack | *“Help me run uvicorn and ngrok on port 8000 in two terminals.”* |
 | Webhook | *“Help me set my Kapso webhook URL and verify token to match `.env`.”* |
+| Kapso feels wrong | *“I’m only using Kapso sandbox—walk me through where API key, phone number ID, and test recipient live so I don’t use production.”* |
 
 You **do not** need to open or paste the `.mdc` file manually—the rule applies automatically in this workspace.
 
@@ -135,16 +136,42 @@ cp .env.example .env
 
 If `python3` is missing, install Python 3.11+ from [python.org](https://www.python.org/downloads/).
 
-### 2) Create your Kapso account + sandbox 🔐
+### 2) Kapso: use **sandbox only** (avoid production confusion) 🔐
+
+**This hackathon starter is built for Kapso’s *sandbox / test* WhatsApp path.** Do **not** try to connect a **production** business number or “go live” unless organizers explicitly ask—that flow has different requirements and will confuse your first day.
+
+| ✅ Do (sandbox) | ❌ Don’t (for this starter) |
+|-----------------|---------------------------|
+| Work inside Kapso’s **Sandbox** / **test** WhatsApp configuration | Onboard a **live production** WhatsApp Business number “just to test” |
+| Add **your own mobile** as the dashboard’s **test / sandbox recipient** | Text the sandbox number from a friend’s phone that was **never** added in Kapso |
+| Copy **API key** + **Phone number ID** from **that same** sandbox config screen | Reuse IDs from another Kapso project, an old browser tab, or a **production** config |
+
+**Two different “numbers” (people mix these up):**
+
+| What | What it is |
+|------|------------|
+| **`KAPSO_PHONE_NUMBER_ID` in `.env`** | The **WhatsApp Phone Number ID** for Kapso’s **sandbox / test sender** (a long numeric id shown next to that test number in the dashboard). **It is not your personal phone.** |
+| **Your personal phone** | The **recipient** you register in Kapso as an allowed **test user** so *your* WhatsApp can chat with the sandbox sender. |
+
+**Pre-flight checklist (tick mentally before saving `.env`):**
+
+- [ ] I’m in Kapso’s **sandbox / test WhatsApp** area (not “production” or a different product).
+- [ ] My phone appears as an **allowed test recipient** (or I finished Kapso’s “add test number” flow).
+- [ ] `KAPSO_API_KEY` comes from **this** Kapso project / sandbox config.
+- [ ] `KAPSO_PHONE_NUMBER_ID` is the **sender’s** WhatsApp Phone Number ID for **that sandbox number**, copied from the same screen as the API key.
+- [ ] I invented `KAPSO_VERIFY_TOKEN` in `.env` and will paste the **identical** string into Kapso when the webhook asks for the verify token.
+
+**Then:**
 
 1. Go to [kapso.ai](https://kapso.ai/) and create/sign in to your account.
-2. Open the WhatsApp **sandbox** setup area.
-3. Add your personal phone number as an allowed test recipient (if prompted).
-4. Copy these values from Kapso into your local `.env`:
+2. Open the WhatsApp **sandbox / test** configuration (wording varies by dashboard version).
+3. Complete **add test recipient** (or equivalent) with **your** mobile in international format if the UI asks.
+4. Copy into `.env`:
    - `KAPSO_API_KEY`
-   - `KAPSO_PHONE_NUMBER_ID`
-5. Pick your own secret verify token and add it to `.env`:
-   - `KAPSO_VERIFY_TOKEN=your-secret-token`
+   - `KAPSO_PHONE_NUMBER_ID` (sender / sandbox number ID — see table above)
+5. Add a secret you choose:
+   - `KAPSO_VERIFY_TOKEN=your-secret-token`  
+   You will reuse this exact value when you create the webhook in Kapso (step 5 later in this doc).
 
 ### 3) Install and configure ngrok (required) 🌍
 
@@ -205,4 +232,6 @@ If you see JSON (including `{"data":[]}`), your key is valid.
 - **No inbound messages:** check both terminals are running, and Kapso URL is exactly `https://<ngrok-host>/webhooks/whatsapp`.
 - **ngrok restarted:** free ngrok URL changed; update webhook URL in Kapso.
 - **Verify token failed:** Kapso verify token and `.env` `KAPSO_VERIFY_TOKEN` do not match exactly.
-- **No WhatsApp delivery:** confirm your phone was added as a sandbox recipient in Kapso.
+- **No WhatsApp delivery / “number not allowed”:** your phone is **not** registered as a **sandbox test recipient**, or you’re texting from a different device than the one you added.
+- **Wrong `KAPSO_PHONE_NUMBER_ID`:** you copied the ID from **production**, another project, or the wrong panel—re-copy from the **same sandbox WhatsApp** screen as the API key.
+- **Trying to use production:** pause and switch back to **sandbox** for this repo; production onboarding is a different checklist (not covered here).
