@@ -30,7 +30,16 @@ To be considered a successful hackathon submission, teams should follow these ru
 2. **Everyone contributes code:** Every teammate must push at least one change to the repository.
 3. **Make it fun:** Build something that excites your team and is genuinely enjoyable to demo.
 
-**How to collaborate:** see **[CONTRIBUTING.md](CONTRIBUTING.md)** (branches, small PRs, secrets).
+**How to collaborate (optional):** **[CONTRIBUTING.md](CONTRIBUTING.md)** is a **suggested** guide (branches, small PRs, secrets)—teams can ignore it or follow it loosely.
+
+**Two common Git approaches:**
+
+| Approach | When it fits |
+|----------|----------------|
+| **Branches on this repo** | Everyone has write access; fastest for small teams. Create a branch, open a PR to `main`, merge often. |
+| **Fork** | You want your own copy under your GitHub user/org, or you only have permission to push to your fork. On GitHub: **Fork** → clone **your** fork → add `upstream` pointing at this starter → branch on the fork → open PRs back to `main` here. |
+
+Step-by-step fork commands live in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ---
 

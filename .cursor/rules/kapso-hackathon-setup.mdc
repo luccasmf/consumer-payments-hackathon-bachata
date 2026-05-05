@@ -16,6 +16,14 @@ When the user wants to **run the project**, **set up their environment**, or **g
   2. Every teammate should push at least one code change.
   3. Build something fun and exciting to demo.
 
+## Git / collaboration (optional)
+
+- **`CONTRIBUTING.md` is optional**—teams may follow it or not.
+- **Two valid flows:**
+  - **Branches on the shared repo:** create a branch, PR to `main`, merge often.
+  - **Fork:** GitHub **Fork** → clone the fork → `git remote add upstream <starter-repo-url>` → work on a branch on the fork → open PRs to upstream `main`.
+- If the user asks how to fork or merge upstream, point them to **`CONTRIBUTING.md`** and the README table; offer to run `git remote -v` / `git fetch upstream` for them if they paste output.
+
 ## Goal
 
 Two processes must run locally: **(1) the API** and **(2) ngrok**. Kapso sends webhooks to the **public HTTPS URL** ngrok provides, which forwards to `localhost`.
@@ -107,4 +115,4 @@ If either process stops, Kapso cannot deliver webhooks → no inbound messages. 
 - **`app/bot.py`** — when a message is received (`handle_inbound`), default demo replies *I just received: …Lets start building 🚀* using parsed text when possible.
 - **`app/send_demo_message.py`** — one-off outbound text (`python -m app.send_demo_message --to "+1…"` from repo root).
 - **`README.md`** — longer reference for ngrok and Kapso links.
-- **`CONTRIBUTING.md`** — hackathon Git workflow (branches, small PRs, no secrets in git).
+- **`CONTRIBUTING.md`** — optional hackathon Git workflow (branches vs fork, small PRs, no secrets in git).
