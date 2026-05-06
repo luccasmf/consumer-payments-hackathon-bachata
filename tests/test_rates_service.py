@@ -120,6 +120,26 @@ class TestFormatQuoteMessage:
         # Spread shown when 2+ providers present.
         assert "Spread" in message
 
+    def test_highlights_the_best_rate(self) -> None:
+        message = rates_service.format_quote_message(
+            "Mexico", "MXN", 250.0, SAMPLE_RESULTS
+        )
+        lines = message.splitlines()
+
+        provider_lines = [line for line in lines if line.startswith("• ")]
+        # 17.11 > 17.0512 → exchangerate-api should be on top with the badge.
+        assert "exchangerate-api" in provider_lines[0]
+        assert "🏆" in provider_lines[0]
+        assert "BEST" in provider_lines[0]
+        assert "open.er-api" in provider_lines[1]
+        assert "🏆" not in provider_lines[1]
+
+        # Summary line with savings vs. worst quote.
+        # extra = 250 * (17.1100 - 17.0512) = 14.70
+        assert "Best deal" in message
+        assert "exchangerate-api" in message
+        assert "14.70" in message
+
     def test_skips_providers_missing_target_currency(self) -> None:
         partial = [
             _make_result("alpha", {"MXN": 17.0}),
@@ -129,8 +149,11 @@ class TestFormatQuoteMessage:
 
         assert "alpha" in message
         assert "beta" not in message
-        # With only one quote remaining we shouldn't print a spread line.
+        # With only one quote remaining we shouldn't print spread/best-deal lines.
         assert "Spread" not in message
+        assert "Best deal" not in message
+        # And there's no badge to award when there's nothing to compare.
+        assert "🏆" not in message
 
     def test_returns_friendly_message_when_no_provider_has_currency(self) -> None:
         none_match = [_make_result("alpha", {"BRL": 5.0})]
@@ -202,6 +225,62 @@ class TestHandleRatesMessage:
 
         assert "country" in reply.lower()
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
+
+    def test_split_turns_country_then_amount(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User sends country first, then the amount in a separate message."""
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
+
+        # Turn 1: trigger.
+        asyncio.run(rates_service.handle_rates_message(self.PHONE, "rates"))
+        # Turn 2: country only.
+        reply2 = asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Mexico")
+        )
+        assert "USD" in reply2  # asks for the amount
+        assert rates_service.is_awaiting_rates_input(self.PHONE) is True
+
+        # Turn 3: amount only — must NOT re-ask for the country.
+        reply3 = asyncio.run(rates_service.handle_rates_message(self.PHONE, "250"))
+        assert "Quote — Mexico" in reply3
+        assert "MXN" in reply3
+        assert "open.er-api" in reply3
+        assert rates_service.is_awaiting_rates_input(self.PHONE) is False
+
+    def test_split_turns_amount_then_country(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same scenario in the opposite order — amount first, then country."""
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
+
+        asyncio.run(rates_service.handle_rates_message(self.PHONE, "rates"))
+
+        reply2 = asyncio.run(rates_service.handle_rates_message(self.PHONE, "250"))
+        assert "country" in reply2.lower()
+        assert rates_service.is_awaiting_rates_input(self.PHONE) is True
+
+        reply3 = asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Mexico")
+        )
+        assert "Quote — Mexico" in reply3
+        assert "250.00 USD" in reply3
+        assert rates_service.is_awaiting_rates_input(self.PHONE) is False
+
+    def test_new_value_overrides_previous_pending(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the user changes their mind mid-flow we use the latest value."""
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
+
+        asyncio.run(rates_service.handle_rates_message(self.PHONE, "rates Mexico"))
+        # User changes the country before specifying the amount.
+        asyncio.run(rates_service.handle_rates_message(self.PHONE, "Brazil"))
+        reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "100"))
+
+        assert "Quote — Brazil" in reply
+        assert "Mexico" not in reply
+        assert "BRL" in reply
 
     def test_returns_friendly_error_when_all_providers_fail(
         self, monkeypatch: pytest.MonkeyPatch
