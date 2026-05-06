@@ -6,10 +6,10 @@ Project context for AI coding agents (Cursor, Claude Code, Codex, etc.) working 
 
 ## TL;DR
 
-- **What we're building:** A WhatsApp + AI conversational product on top of [Kapso](https://docs.kapso.ai/docs/introduction) (Meta Tech Provider) + FastAPI. Pick an idea inside the constraints in `KICKOFF.md`.
+- **What we're building:** A WhatsApp + AI conversational product on top of [Kapso](https://docs.kapso.ai/docs/introduction) (Meta Tech Provider) + FastAPI. **Product vision (Team Bachata):** API that compares FX/remittance quotes across providers — see [`docs/FX Rate Comparison API.md`](docs/FX%20Rate%20Comparison%20API.md). Hackathon constraints remain in `KICKOFF.md`.
 - **Stack:** Python **3.12** (pinned in `.python-version`), FastAPI, Uvicorn, httpx, pydantic-settings, pytest. No DB.
 - **Deadline:** Wed May 6, **3 PM code freeze**, demos 3:30 PM, awards 4:30 PM (see `KICKOFF.md`).
-- **Where we coordinate:** Bachata team Slack group DM → [felix-pago.slack.com/archives/C0B1XAGP0RK](https://felix-pago.slack.com/archives/C0B1XAGP0RK). Cross-team hackathon channel is `#cp-hackathon`.
+- **Where we coordinate:** Bachata team Slack group DM → [felix-pago.slack.com/archives/C0B1XAGP0RK](https://felix-pago.slack.com/archives/C0B1XAGP0RK).
 - **Team branch:** `team-bachata`. Members:
   - Sam Cohen — `@sam`
   - Luccas Monteiro — `@luccasmonteiro`
@@ -63,10 +63,23 @@ app/
     ├── health.py
     └── kapso/               # KapsoMessage / KapsoConversation / KapsoWebhook (extra="allow" — Kapso may add fields)
 tests/test_app.py            # in-process TestClient, no network, no Kapso credentials needed
+docs/                        # product notes (e.g. Bachata FX comparison vision)
 .cursor/rules/               # always-on setup rule for non-technical teammates
 ```
 
 When in doubt: **edit `app/bot.py`** for behavior, **`app/services/kapso_client.py`** for new send capabilities, **`app/config.py`** for new secrets/env vars.
+
+---
+
+## Copying docs to a local Obsidian vault (optional)
+
+Teammates may keep personal notes in **Obsidian** outside this repo. When asked, agents can **copy or mirror** files such as `docs/*.md`, `AGENTS.md`, or `README.md` into that vault.
+
+1. **Configure your machine:** set `OBSIDIAN_VAULT_PATH` in `.env` to the **absolute path** of your Obsidian vault (or a folder inside it where Bachata notes should live). See `.env.example`. The value is local-only (`.env` is gitignored); it is **not** a Kapso or API secret, but it is still personal.
+2. **If the path is empty or missing:** the agent should **ask** for the absolute path before writing any file outside the repository.
+3. **Step-by-step behavior** for the agent: `.cursor/skills/obsidian-hackathon-docs/SKILL.md` (pick a sensible subfolder inside the vault if the user does not specify one).
+
+The FastAPI app does not need this variable to run; it exists so humans and agents share one documented place for “where my Obsidian lives.”
 
 ---
 
