@@ -18,6 +18,7 @@ import httpx
 
 from .base import FxProvider, FxProviderResult
 from .exchangerate_api import ExchangeRateApiProvider
+from .felix_pago_public import FelixPagoPublicProvider
 from .open_er_api import OpenErApiProvider
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ BASE_PROVIDER: FxProvider = OpenErApiProvider()
 # downstream consumers that pick ``results[0]``.
 PROVIDERS: list[FxProvider] = [
     BASE_PROVIDER,
+    FelixPagoPublicProvider(),
     ExchangeRateApiProvider(),
 ]
 
@@ -61,6 +63,7 @@ async def fetch_all_quotes(
 __all__ = [
     "BASE_PROVIDER",
     "ExchangeRateApiProvider",
+    "FelixPagoPublicProvider",
     "FxProvider",
     "FxProviderResult",
     "OpenErApiProvider",
