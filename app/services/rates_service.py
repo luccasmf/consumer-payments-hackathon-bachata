@@ -267,8 +267,14 @@ def format_comparison_response(
             )
 
     if len(ranked_remittance) >= 2:
+        best = ranked_remittance[0]
         worst = ranked_remittance[-1]
         lines.append("")
+        lines.append(
+            f"✅ *{best.provider}* delivers the most today — "
+            f"*{best.total_received:,.2f} {response.currency_code}* "
+            "for this send amount."
+        )
         lines.append(
             f"⚠️ *{worst.provider}* delivers the least today — "
             f"*{worst.total_received:,.2f} {response.currency_code}* "
