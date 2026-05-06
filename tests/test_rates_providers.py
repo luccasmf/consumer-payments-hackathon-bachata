@@ -12,6 +12,7 @@ import pytest
 from app.services import rates_providers
 from app.services.rates_providers import (
     ExchangeRateApiProvider,
+    FelixPagoPublicProvider,
     FxProvider,
     OpenErApiProvider,
     fetch_all_quotes,
@@ -113,6 +114,52 @@ class TestExchangeRateApiProvider:
             asyncio.run(run())
 
 
+class TestFelixPagoPublicProvider:
+    SAMPLE: dict[str, Any] = {
+        "USD": {"base": "1"},
+        "MXN": {"base": "16.99", "tradfi_fv": "17.26"},
+        "BRL": {"tradfi_fv": "4.95"},
+        "COP": {"base": "3667.95", "tradfi_fv": "3735.63"},
+    }
+
+    def test_fetch_prefers_base_then_tradfi_fv(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.host == "us-central1-felix-tech-production.cloudfunctions.net"
+            assert "/all_rates_public" in str(request.url)
+            return httpx.Response(200, json=self.SAMPLE)
+
+        async def run() -> FxProviderResult:
+            async with httpx.AsyncClient(transport=_mock_transport(handler)) as c:
+                return await FelixPagoPublicProvider().fetch_result(client=c)
+
+        result = asyncio.run(run())
+
+        assert result.provider == "felixpago.com"
+        assert result.is_base is False
+        assert result.rates["USD"] == pytest.approx(1.0)
+        assert result.rates["MXN"] == pytest.approx(16.99)
+        assert result.rates["BRL"] == pytest.approx(4.95)
+        assert result.rates["COP"] == pytest.approx(3667.95)
+
+    @pytest.mark.parametrize(
+        "bad_json",
+        [
+            [],
+            {"XX": {"base": "1"}},  # invalid code → empty rates
+        ],
+    )
+    def test_raises_value_error_on_unusable_payload(self, bad_json: Any) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=bad_json)
+
+        async def run() -> None:
+            async with httpx.AsyncClient(transport=_mock_transport(handler)) as c:
+                await FelixPagoPublicProvider().fetch_result(client=c)
+
+        with pytest.raises(ValueError):
+            asyncio.run(run())
+
+
 # ---------------------------------------------------------------------------
 # Aggregator tests
 # ---------------------------------------------------------------------------
@@ -182,5 +229,5 @@ class TestFetchAllQuotes:
 
     def test_default_uses_module_providers_list(self) -> None:
         assert isinstance(rates_providers.PROVIDERS, list)
-        assert len(rates_providers.PROVIDERS) >= 2
+        assert len(rates_providers.PROVIDERS) >= 3
         assert all(isinstance(p, FxProvider) for p in rates_providers.PROVIDERS)
