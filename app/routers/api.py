@@ -1,9 +1,10 @@
 import logging
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
 
-from app.schemas import MessageResponse, SendTextRequest
+from app.schemas import MessageResponse, MonitoCompareRequest, SendTextRequest
 from app.services.kapso_client import KapsoClient
 
 router = APIRouter()
@@ -42,3 +43,35 @@ async def kapso_account() -> dict:
     except httpx.HTTPError as e:
         logger.exception("kapso_account upstream error")
         raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@router.post("/monito/compare")
+async def monito_compare(req: MonitoCompareRequest) -> list[dict[str, Any]]:
+    """Scrape Monito compare (Playwright) for US → ``country`` at ``amount``; returns provider rows only.
+
+    This can take tens of seconds. Requires Chromium: ``playwright install chromium``.
+    """
+    from app.services.monito_playwright_service import MonitoPlaywrightService
+
+    service = MonitoPlaywrightService()
+    try:
+        return await service.compare(
+            req.country,
+            req.amount,
+            receive_currency=req.receive_currency,
+            top=req.top,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except TimeoutError as e:
+        logger.warning("monito_compare timeout: %s", e)
+        raise HTTPException(
+            status_code=504,
+            detail="Monito compare timed out before results were ready.",
+        ) from e
+    except Exception as e:
+        logger.exception("monito_compare failed")
+        raise HTTPException(
+            status_code=502,
+            detail=str(e)[:4000],
+        ) from e
