@@ -86,6 +86,58 @@ These dimensions can map to future API **query params** (e.g. `user_segment=new|
 - The bot calls comparison logic (local or internal service) and replies with a **short ranking** and disclaimers.  
 - Canonical message handling: [`app/bot.py`](../app/bot.py).
 
+### Bot reply format
+
+The bot reply must be **all-in** (rate + fee already baked in — no surprises) and follow this structure:
+
+```
+Hoy $<amount> dólares se convierten así (ya con todo incluido, sin sorpresas):
+
+1️⃣ <Provider> → $<pesos> pesos — <fee info>, tarda <delivery time>
+2️⃣ <Provider> → $<pesos> pesos — <fee info>, <delivery time>
+...
+
+⚠️ <Worst provider> cobra $<fee> dólares extra y solo da $<pesos> pesos — la peor opción hoy.
+
+¿Qué te conviene?
+• *<Use case>*: <Provider>
+• *<Use case>*: <Provider> o <Provider>
+• *<Use case>*: <Provider>
+
+La diferencia entre el mejor y el peor es $<diff> pesos por cada $<amount> que envías.
+```
+
+**Example output (USD 100 → MXN):**
+
+```
+Hoy $100 dólares se convierten así (ya con todo incluido, sin sorpresas):
+
+1️⃣ MoneyGram → $1,778 pesos — gratis, tarda hasta 1 día
+2️⃣ Western Union → $1,760 pesos — gratis, en minutos
+3️⃣ Remitly → $1,758 pesos — gratis, en minutos
+4️⃣ Xoom → $1,752 pesos — gratis, tarda 2 días
+5️⃣ Félix → $1,740 pesos — gratis, en minutos, por WhatsApp
+6️⃣ Taptap Send → $1,716 pesos — gratis, en minutos
+
+⚠️ XE cobra $3 dólares extra y solo da $1,656 pesos — la peor opción hoy.
+
+¿Qué te conviene?
+• *Más pesos, puedes esperar un día*: MoneyGram
+• *Buen rate y al instante*: Western Union o Remitly
+• *Sin descargar nada, desde WhatsApp*: Félix
+
+La diferencia entre el mejor y el peor es $122 pesos por cada $100 que envías.
+```
+
+**Formatting rules:**
+- Rank providers by **all-in pesos received** (descending).
+- Use numbered emoji (1️⃣ 2️⃣ …) for each provider line.
+- Always show fee info inline: `gratis` or `cobra $X dólares`.
+- Delivery time: `en minutos`, `tarda hasta 1 día`, `tarda 2 días`, etc.
+- ⚠️ section: call out the worst option explicitly with reason.
+- "¿Qué te conviene?" section: 2–3 bullets matching the user's likely priorities.
+- Closing line: absolute peso difference between best and worst option.
+
 ---
 
 ## Risks and compliance
