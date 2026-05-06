@@ -36,15 +36,15 @@ These notes track what **actually ships** in the hackathon codebase (May 2026):
 
 | Piece | Location / behavior |
 |--------|---------------------|
-| **Conversation** | Two-turn flow in `app/services/rates_service.py`: keywords such as *rate*, *fx*, *tasa*, *cotización* → prompt for **country + USD amount**; user can answer in one message (*Mexico 250*) or split across messages. State is **in-memory per phone** (`_pending_rates`). |
+| **Conversation** | Two-turn flow in `app/services/rates_service.py`: `_RATE_KEYWORDS` routes messages (*rate*, *rates*, *fx*, *exchange*, *tasa*, *tasas*, *cambio*, *tipo de cambio*, *cotizacion*, *cotización*) → prompt for **country + USD amount**; user can answer in one message (*Mexico 250*) or split across messages. State is **in-memory per phone** (`_pending_rates`). |
 | **Featured corridors** | Mexico (MXN), Colombia (COP), Guatemala (GTQ), Honduras (HNL), Dominican Republic (DOP), Brazil (BRL) — see `_FEATURED_CORRIDORS` and `_COUNTRY_ALIASES`. |
 | **Rate-table providers** | `app/services/rates_providers/__init__.py`: **Spot anchor** via `OpenErApiProvider` ([open.er-api.com](https://open.er-api.com)) — internal id `open.er-api`, user label **General exchange price** — plus **Felix** public rates (`FelixPagoPublicProvider`). |
 | **Remittance rows** | For currencies listed in `_CURRENCY_TO_ISO2`, `fetch_monito_quotes` adds **one row per Monito compare provider** (Remitly, Wise, WU, … depending on Monito). Other currencies still get the reference + Felix lines only. |
-| **Caching** | When Redis is configured (`app/services/redis_client.py`), full comparisons are cached **5 minutes** under `fx:comparison:<currency>:<amount_normalized>`. |
-| **Chart** | `get_history_chart_url` builds a **7-day** trend; the bot sends it as an **image** with the comparison as caption (or splits caption vs text if over WhatsApp limits — see `chart_reply_media_parts` in `app/bot.py`). |
-| **Structured model** | `app/schemas/fx_comparison.py` — `FxComparisonResponse` with `best_provider`, `spread_rate`, `advantage_vs_worst` among **remittance** quotes only (excludes the default spot feed). |
+| **Caching** | When **Upstash Redis** is configured (`REDIS_URL` + `REDIS_TOKEN` in `.env`, via `app/services/redis_client.py`), full comparisons are cached **300 seconds** under `fx:comparison:<currency>:<amount_normalized>` (amount rounded to cents in the key). |
+| **Chart** | `get_history_chart_url` (see `app/services/rates_history.py`) builds a **7-day** USD→currency trend using historical spots from **fawazahmed0/currency-api** on jsDelivr, rendered via **QuickChart**. The bot sends it as an **image** with the comparison as caption; if the body exceeds Meta’s **1024**-character image-caption limit, caption is shortened and the full text follows in a second message (`chart_reply_media_parts` in `app/bot.py`). |
+| **Structured model** | `app/schemas/fx_comparison.py` — `FxComparisonResponse` with `best_provider` (top remittance by `total_received`). **`spread_rate`** = max − min `rate_per_usd` among remittance quotes when ≥2 exist; **`advantage_vs_worst`** = `amount_usd × spread_rate`. Both exclude the default spot feed (`open.er-api`). The WhatsApp gap line uses **best − worst `total_received`**, which matches that spread when best/worst are the rate extremes. |
 
-**HTTP endpoint (debug / integration):** `POST /api/monito/compare` — runs the Monito Playwright scrape only (can take tens of seconds; requires Chromium). There is no separate public `GET /compare` for the full bundled comparison yet; the **primary surface is WhatsApp** via `handle_rates_message`.
+**HTTP endpoint (debug / integration):** `POST /api/monito/compare` — body `MonitoCompareRequest`: `country` (ISO alpha-2, e.g. `mx`), `amount` (>0), optional `receive_currency` (ISO 4217), optional `top` (cap rows, `0` = all). Runs the Monito Playwright scrape only (can take tens of seconds; requires Chromium). There is no separate public `GET /compare` for the full bundled comparison yet; the **primary surface is WhatsApp** via `handle_rates_message`.
 
 ---
 
