@@ -41,9 +41,10 @@ logger = logging.getLogger(__name__)
 
 FX_QUOTE_CACHE_TTL_SECONDS = 300
 
-# Canonical spot / chart anchor (see ``OpenErApiProvider``). Rendered in the reply as the
-# mid-market reference row alongside remittance quotes for comparison.
+# Canonical spot / chart anchor (see ``OpenErApiProvider``). Internal id matches
+# ``OpenErApiProvider.name``; users see :data:`DEFAULT_FX_PROVIDER_DISPLAY_NAME` instead.
 DEFAULT_FX_PROVIDER_NAME = "open.er-api"
+DEFAULT_FX_PROVIDER_DISPLAY_NAME = "General exchange price"
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,8 @@ def build_fx_comparison_from_providers(
     """Build a structured comparison from raw provider results (ordered like ``results``).
 
     Carries ``is_base`` through onto each :class:`FxProviderQuote`. Best quote /
-    spread metrics apply to **remittance** providers only (excluding open.er-api).
+    spread metrics apply to **remittance** providers only (excluding the default
+    spot feed: :data:`DEFAULT_FX_PROVIDER_NAME`).
     """
     quotes: list[FxProviderQuote] = []
     ts = timestamp or datetime.now(UTC)
@@ -138,6 +140,13 @@ def build_fx_comparison_from_providers(
     )
 
 
+def _provider_display_name(provider: str) -> str:
+    """User-facing label; the base spot feed is not branded as the upstream API name."""
+    if provider == DEFAULT_FX_PROVIDER_NAME:
+        return DEFAULT_FX_PROVIDER_DISPLAY_NAME
+    return provider
+
+
 def _rank_number_emoji(index: int) -> str:
     """1️⃣ … 🔟 for the first ten rows; plain digits after that."""
     glyphs = (
@@ -159,25 +168,41 @@ def _rank_number_emoji(index: int) -> str:
 
 def _quick_pick_bullets(
     response: FxComparisonResponse,
-    ranked: list[FxProviderQuote],
+    ranked_remittance: list[FxProviderQuote],
 ) -> list[str]:
-    """2–3 English bullets aligned with the product doc (priorities / picks)."""
+    """2–3 English bullets aligned with the product doc (priorities / picks).
+
+    ``ranked_remittance`` is remittance-only (excludes the default spot quote).
+    """
+    if not ranked_remittance:
+        return [
+            f"• *{DEFAULT_FX_PROVIDER_DISPLAY_NAME}* is the mid-market reference — "
+            "no remittance quotes came back for this corridor."
+        ]
+
     lines_out: list[str] = [
-        f"• *Most {response.currency_code} received*: {ranked[0].provider}",
+        f"• *Most {response.currency_code} received*: "
+        f"{_provider_display_name(ranked_remittance[0].provider)}",
     ]
-    if len(ranked) >= 2:
-        lines_out.append(f"• *Next best*: {ranked[1].provider}")
-    if len(lines_out) < 3 and len(ranked) >= 3:
-        third = ranked[2]
-        if third.provider == DEFAULT_FX_PROVIDER_NAME:
-            lines_out.append(f"• *Mid-market benchmark*: {third.provider}")
-        else:
-            lines_out.append(f"• *Also competitive*: {third.provider}")
+    if len(ranked_remittance) >= 2:
+        lines_out.append(
+            f"• *Next best*: {_provider_display_name(ranked_remittance[1].provider)}"
+        )
+    if len(lines_out) < 3 and len(ranked_remittance) >= 3:
+        third = ranked_remittance[2]
+        lines_out.append(f"• *Also competitive*: {_provider_display_name(third.provider)}")
     elif len(lines_out) < 3:
-        felix_q = next((q for q in ranked if "felix" in q.provider.lower()), None)
-        top_names = {ranked[i].provider for i in range(min(2, len(ranked)))}
+        felix_q = next(
+            (q for q in ranked_remittance if "felix" in q.provider.lower()),
+            None,
+        )
+        top_names = {
+            ranked_remittance[i].provider for i in range(min(2, len(ranked_remittance)))
+        }
         if felix_q is not None and felix_q.provider not in top_names:
-            lines_out.append(f"• *On WhatsApp*: {felix_q.provider}")
+            lines_out.append(
+                f"• *On WhatsApp*: {_provider_display_name(felix_q.provider)}"
+            )
     return lines_out[:3]
 
 
@@ -189,8 +214,10 @@ def format_comparison_response(
     """Render WhatsApp body text from a structured comparison.
 
     English layout aligned with ``docs/FX Rate Comparison API.md``: intro,
-    numbered all-in rows (best→worst), explicit worst callout, quick picks,
-    and best-vs-worst gap; trailing UTC timestamp.
+    optional default spot line (:data:`DEFAULT_FX_PROVIDER_DISPLAY_NAME`),
+    numbered remittance rows (best→worst), explicit worst remittance callout,
+    quick picks, and best-vs-worst gap among remittance quotes; trailing UTC
+    timestamp.
     """
     if not response.quotes:
         return (
@@ -198,13 +225,18 @@ def format_comparison_response(
             f"({response.currency_code}) from any provider right now. Try again in a moment."
         )
 
-    ranked = sorted(
-        response.quotes,
+    reference_q = next(
+        (q for q in response.quotes if q.provider == DEFAULT_FX_PROVIDER_NAME),
+        None,
+    )
+    remittance = [
+        q for q in response.quotes if q.provider != DEFAULT_FX_PROVIDER_NAME
+    ]
+    ranked_remittance = sorted(
+        remittance,
         key=lambda q: q.total_received,
         reverse=True,
     )
-    best = ranked[0]
-    worst = ranked[-1]
 
     lines = [
         (
@@ -215,18 +247,27 @@ def format_comparison_response(
         "",
     ]
 
-    for i, quote in enumerate(ranked):
-        prefix = _rank_number_emoji(i)
-        if quote.provider == DEFAULT_FX_PROVIDER_NAME:
-            detail = " — mid-market reference (chart)"
-        else:
-            detail = " — all-in estimate"
+    if reference_q:
         lines.append(
-            f"{prefix} *{quote.provider}* → "
-            f"*{quote.total_received:,.2f} {response.currency_code}*{detail}"
+            f"*{DEFAULT_FX_PROVIDER_DISPLAY_NAME}* → "
+            f"*{reference_q.total_received:,.2f} {response.currency_code}* "
+            "— mid-market reference (chart)"
         )
+        lines.append("")
 
-    if len(ranked) >= 2:
+    if ranked_remittance:
+        lines.append("*Remittance estimates*")
+        lines.append("")
+        for i, quote in enumerate(ranked_remittance):
+            prefix = _rank_number_emoji(i)
+            lines.append(
+                f"{prefix} *{quote.provider}* → "
+                f"*{quote.total_received:,.2f} {response.currency_code}* "
+                "— all-in estimate"
+            )
+
+    if len(ranked_remittance) >= 2:
+        worst = ranked_remittance[-1]
         lines.append("")
         lines.append(
             f"⚠️ *{worst.provider}* delivers the least today — "
@@ -236,9 +277,11 @@ def format_comparison_response(
 
     lines.append("")
     lines.append("*What works best for you?*")
-    lines.extend(_quick_pick_bullets(response, ranked))
+    lines.extend(_quick_pick_bullets(response, ranked_remittance))
 
-    if len(ranked) >= 2:
+    if len(ranked_remittance) >= 2:
+        best = ranked_remittance[0]
+        worst = ranked_remittance[-1]
         diff = best.total_received - worst.total_received
         lines.append("")
         lines.append(
@@ -501,14 +544,17 @@ def format_missing_input_message(has_country: bool, has_amount: bool) -> str:
 
 
 def _chart_title_for(code: str) -> str:
-    return f"USD → {code} • last 7 days (base: open.er-api)"
+    return (
+        f"USD → {code} • last 7 days ({DEFAULT_FX_PROVIDER_DISPLAY_NAME})"
+    )
 
 
 def _chart_attachment_footer(currency_code: str) -> str:
     """Appended to the quote when a 7-day trend image is sent with the same reply."""
     return (
         "\n\n📊 _The graph shows *USD→"
-        f"{currency_code}* over the *last 7 days* (mid-market baseline / open.er-api)._"
+        f"{currency_code}* over the *last 7 days* "
+        f"(mid-market baseline / {DEFAULT_FX_PROVIDER_DISPLAY_NAME})._"
     )
 
 

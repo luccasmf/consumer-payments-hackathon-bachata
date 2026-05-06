@@ -197,18 +197,21 @@ class TestFormatQuoteMessage:
         assert "250.00 USD" in message
         assert "4,262.80" in message
         assert "4,277.50" in message
-        assert "open.er-api" in message
+        assert rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in message
+        assert "open.er-api" not in message
         assert "Wise" in message
+        assert "Remittance estimates" in message
         assert "1️⃣" in message
         assert "What works best for you?" in message
-        assert "The difference between the best and worst is" in message
+        # Only one remittance row → no best-vs-worst gap among remittance quotes.
+        assert "The difference between the best and worst is" not in message
         assert "2026-05-06 16:44" in message
 
     def test_three_feeds_gap_uses_best_minus_worst_total(self) -> None:
         message = rates_service.format_quote_message(
             "Mexico", "MXN", 250.0, THREE_REMITTANCE_RESULTS
         )
-        # Ranked: Wise 4277.5, open.er-api 4262.8, low-tier 4250.0 → gap 27.50
+        # Remittance: Wise 4277.5, low-tier 4250.0 — gap 27.50 (spot reference excluded)
         assert "27.50" in message
 
     def test_highlights_the_best_rate(self) -> None:
@@ -217,14 +220,14 @@ class TestFormatQuoteMessage:
         )
         lines = message.splitlines()
 
-        ranked_lines = [line for line in lines if "→" in line]
-        assert ranked_lines[0].startswith("1️⃣") and "Wise" in ranked_lines[0]
-        assert "4,277.50" in ranked_lines[0]
-        assert ranked_lines[1].startswith("2️⃣") and "open.er-api" in ranked_lines[1]
-        assert "4,262.80" in ranked_lines[1]
+        arrow_lines = [line for line in lines if "→" in line]
+        assert arrow_lines[0].startswith("*General exchange price*")
+        assert "4,262.80" in arrow_lines[0]
+        assert arrow_lines[1].startswith("1️⃣") and "Wise" in arrow_lines[1]
+        assert "4,277.50" in arrow_lines[1]
 
         assert "Wise" in message
-        assert "⚠️" in message and "open.er-api" in message
+        assert "⚠️" not in message
 
     def test_skips_providers_missing_target_currency(self) -> None:
         partial = [
@@ -249,7 +252,11 @@ class TestFormatQuoteMessage:
         message = rates_service.format_quote_message(
             "Mexico", "MXN", 250.0, SAMPLE_RESULTS
         )
-        base_line = next(line for line in message.splitlines() if "open.er-api" in line)
+        base_line = next(
+            line
+            for line in message.splitlines()
+            if rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in line
+        )
         secondary_line = next(line for line in message.splitlines() if "Wise" in line)
 
         assert "mid-market reference (chart)" in base_line
@@ -264,12 +271,17 @@ class TestFormatQuoteMessage:
             _make_result("Wise", {"MXN": 17.0}),
         ]
         message = rates_service.format_quote_message("Mexico", "MXN", 100.0, results)
-        default_line = next(line for line in message.splitlines() if "open.er-api" in line)
+        default_line = next(
+            line
+            for line in message.splitlines()
+            if rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in line
+        )
         assert "1,750.00" in default_line
         assert "mid-market reference (chart)" in default_line
 
-        assert message.splitlines()[2].startswith("1️⃣") and "open.er-api" in message.splitlines()[2]
-        wise_line = next(line for line in message.splitlines() if "Wise" in line)
+        wise_line = next(
+            line for line in message.splitlines() if line.startswith("1️⃣") and "Wise" in line
+        )
         assert "1,700.00" in wise_line
 
 
@@ -299,7 +311,8 @@ class TestHandleRatesMessage:
         )
 
         assert "Mexico" in reply.body
-        assert "open.er-api" in reply.body
+        assert rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in reply.body
+        assert "open.er-api" not in reply.body
         assert "Wise" in reply.body
         assert "4,262.80" in reply.body
         assert "4,277.50" in reply.body
@@ -416,7 +429,8 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
-        assert "open.er-api" in reply.body
+        assert rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in reply.body
+        assert "open.er-api" not in reply.body
         assert "4,262.80" in reply.body
         assert "Wise" not in reply.body
         assert "4,277.50" not in reply.body
@@ -490,20 +504,20 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
-        # All sources appear as distinct providers in the body.
-        assert "open.er-api" in reply.body
+        # Reference row + three remittance rows (Monito); upstream API name hidden.
+        assert rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in reply.body
+        assert "open.er-api" not in reply.body
         assert "Remitly" in reply.body
         assert "Wise" in reply.body
         assert "Western Union" in reply.body
 
         ranked = [line for line in reply.body.splitlines() if "→" in line]
-        # Four ranked rows (Remitly, Wise, open.er-api, WU) by all-in MXN received.
         assert len(ranked) == 4
-        assert ranked[0].startswith("1️⃣") and "Remitly" in ranked[0]
-        assert ranked[1].startswith("2️⃣") and "Wise" in ranked[1]
-        assert ranked[2].startswith("3️⃣") and "open.er-api" in ranked[2]
-        assert "mid-market reference (chart)" in ranked[2]
-        assert ranked[3].startswith("4️⃣") and "Western Union" in ranked[3]
+        assert ranked[0].startswith("*General exchange price*")
+        assert "mid-market reference (chart)" in ranked[0]
+        assert ranked[1].startswith("1️⃣") and "Remitly" in ranked[1]
+        assert ranked[2].startswith("2️⃣") and "Wise" in ranked[2]
+        assert ranked[3].startswith("3️⃣") and "Western Union" in ranked[3]
 
     def test_monito_passes_country_iso2_and_amount(
         self, monkeypatch: pytest.MonkeyPatch
