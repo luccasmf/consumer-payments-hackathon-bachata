@@ -13,6 +13,44 @@ from app.services.rates_service import (
     is_rates_request,
 )
 
+_HELP_TRIGGERS: frozenset[str] = frozenset(
+    {
+        "ayuda",
+        "help",
+        "/ayuda",
+        "/help",
+        "comandos",
+        "menu",
+        "info",
+    }
+)
+
+HELP_MESSAGE = (
+    "📖 *Help*\n\n"
+    "*What you can do*\n"
+    "• *FX quotes:* send keywords like *rate*, *rates*, *fx*, *exchange*, "
+    "or *tasa* / *cotización* / *tipo de cambio*. I'll ask for a destination "
+    "country and an amount in *USD* to compare sample quotes across "
+    "providers.\n"
+    "• *Demo mode:* any other text message gets a short demonstration "
+    "reply.\n\n"
+    "*What I can't do*\n"
+    "• I can't send money or complete transfers—this is information only.\n"
+    "• I don't store bank details or process payments in this chat.\n"
+    "• Quotes are for side-by-side comparison; each provider sets the "
+    "final price.\n\n"
+    "_Send *help* (or *ayuda*) anytime to see this again._"
+)
+
+
+def is_help_request(text: str | None) -> bool:
+    """True if the user is explicitly asking for the help text."""
+    if not text:
+        return False
+    first = text.strip().lower().split(maxsplit=1)[0]
+    first = first.rstrip("?!.")
+    return first in _HELP_TRIGGERS
+
 
 def inbound_text(msg: KapsoMessage) -> str | None:
     """Best-effort text or button title from an inbound Kapso/WA message."""
@@ -48,7 +86,9 @@ async def handle_inbound(msg: KapsoMessage, client: KapsoClient) -> None:
     """
     text = inbound_text(msg)
 
-    if is_rates_request(text) or is_awaiting_rates_input(msg.phone_number):
+    if is_help_request(text):
+        body = HELP_MESSAGE
+    elif is_rates_request(text) or is_awaiting_rates_input(msg.phone_number):
         body = await handle_rates_message(msg.phone_number, text)
     else:
         body = _reply_body_for_demo(text, msg.type)
