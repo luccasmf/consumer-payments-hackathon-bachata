@@ -193,36 +193,23 @@ class TestFormatQuoteMessage:
         message = rates_service.format_comparison_response(comparison)
 
         assert "Mexico" in message
-        assert "you're sending" in message
+        assert "converts like this" in message
         assert "250.00 USD" in message
         assert "4,262.80" in message
         assert "4,277.50" in message
         assert "open.er-api" in message
         assert "Wise" in message
-        assert "Default FX rate" in message
-        assert "Remittance provider rates" in message
-        assert "Best FX:" in message
+        assert "1️⃣" in message
+        assert "What works best for you?" in message
+        assert "The difference between the best and worst is" in message
         assert "2026-05-06 16:44" in message
 
-    @pytest.mark.parametrize(
-        "results, expect_spread_line",
-        [
-            (SAMPLE_RESULTS, False),
-            (THREE_REMITTANCE_RESULTS, True),
-        ],
-    )
-    def test_spread_line_only_with_multiple_remittance_feeds(
-        self,
-        results: list[FxProviderResult],
-        expect_spread_line: bool,
-    ) -> None:
-        message = rates_service.format_quote_message("Mexico", "MXN", 250.0, results)
-        if expect_spread_line:
-            assert "more than the lowest remittance quote" in message
-            # 250 * (17.11 - 17.00) = 27.50 MXN between best and worst remittance.
-            assert "27.50" in message
-        else:
-            assert "more than the lowest remittance quote" not in message
+    def test_three_feeds_gap_uses_best_minus_worst_total(self) -> None:
+        message = rates_service.format_quote_message(
+            "Mexico", "MXN", 250.0, THREE_REMITTANCE_RESULTS
+        )
+        # Ranked: Wise 4277.5, open.er-api 4262.8, low-tier 4250.0 → gap 27.50
+        assert "27.50" in message
 
     def test_highlights_the_best_rate(self) -> None:
         message = rates_service.format_quote_message(
@@ -230,23 +217,14 @@ class TestFormatQuoteMessage:
         )
         lines = message.splitlines()
 
-        provider_lines = [line for line in lines if line.startswith("• ")]
-        # Default spot block first; remittance list sorted best → worst (by total MXN).
-        assert "open.er-api" in provider_lines[0]
-        assert "4,262.80" in provider_lines[0]
-        assert "Wise" in provider_lines[1]
-        assert "4,277.50" in provider_lines[1]
-        # The 🏆 callout sits on its own line, not on a bullet.
-        assert not any("🏆" in line for line in provider_lines)
+        ranked_lines = [line for line in lines if "→" in line]
+        assert ranked_lines[0].startswith("1️⃣") and "Wise" in ranked_lines[0]
+        assert "4,277.50" in ranked_lines[0]
+        assert ranked_lines[1].startswith("2️⃣") and "open.er-api" in ranked_lines[1]
+        assert "4,262.80" in ranked_lines[1]
 
-        # SAMPLE_RESULTS has only one remittance feed → no spread copy,
-        # but the Best FX callout still names the winner.
         assert "Wise" in message
-        assert "more than the lowest remittance quote" not in message
-        idx = lines.index("*Remittance provider rates (best → worst)*")
-        # blank line, then "🏆 *Best FX:* ..." after the single remittance bullet.
-        assert lines[idx + 3].startswith("🏆 *Best FX:*")
-        assert "Wise" in lines[idx + 3]
+        assert "⚠️" in message and "open.er-api" in message
 
     def test_skips_providers_missing_target_currency(self) -> None:
         partial = [
@@ -258,9 +236,8 @@ class TestFormatQuoteMessage:
         assert "1,700.00" in message
         assert "alpha" in message
         assert "beta" not in message
-        # One remittance quote → spread paragraph omitted; Best FX line still names the winner.
-        assert "more than the lowest remittance quote" not in message
-        assert "🏆 *Best FX:* *alpha*" in message
+        assert "The difference between the best and worst is" not in message
+        assert "1️⃣ *alpha*" in message
 
     def test_returns_friendly_message_when_no_provider_has_currency(self) -> None:
         none_match = [_make_result("alpha", {"BRL": 5.0})]
@@ -272,14 +249,11 @@ class TestFormatQuoteMessage:
         message = rates_service.format_quote_message(
             "Mexico", "MXN", 250.0, SAMPLE_RESULTS
         )
-        provider_lines = [line for line in message.splitlines() if line.startswith("• ")]
+        base_line = next(line for line in message.splitlines() if "open.er-api" in line)
+        secondary_line = next(line for line in message.splitlines() if "Wise" in line)
 
-        # open.er-api is default spot → chart tag stays on that bullet only.
-        base_line = next(line for line in provider_lines if "4,262.80" in line)
-        secondary_line = next(line for line in provider_lines if "4,277.50" in line)
-        assert "📍" in base_line
-        assert "chart" in base_line
-        assert "📍" not in secondary_line
+        assert "mid-market reference (chart)" in base_line
+        assert "mid-market reference (chart)" not in secondary_line
 
     def test_default_spot_can_outrank_remittance_but_best_callout_is_remittance_only(
         self,
@@ -290,16 +264,13 @@ class TestFormatQuoteMessage:
             _make_result("Wise", {"MXN": 17.0}),
         ]
         message = rates_service.format_quote_message("Mexico", "MXN", 100.0, results)
-        default_line = next(
-            line for line in message.splitlines()
-            if line.startswith("• ") and "open.er-api" in line
-        )
+        default_line = next(line for line in message.splitlines() if "open.er-api" in line)
         assert "1,750.00" in default_line
-        assert "chart" in default_line
+        assert "mid-market reference (chart)" in default_line
 
-        best_line = next(line for line in message.splitlines() if line.startswith("🏆 *Best FX:"))
-        assert "Wise" in best_line
-        assert "1,700.00" in best_line
+        assert message.splitlines()[2].startswith("1️⃣") and "open.er-api" in message.splitlines()[2]
+        wise_line = next(line for line in message.splitlines() if "Wise" in line)
+        assert "1,700.00" in wise_line
 
 
 class TestHandleRatesMessage:
@@ -384,7 +355,7 @@ class TestHandleRatesMessage:
 
         reply3 = asyncio.run(rates_service.handle_rates_message(self.PHONE, "250"))
         assert "Mexico" in reply3.body
-        assert "you're sending" in reply3.body
+        assert "converts like this" in reply3.body
         assert "MXN" in reply3.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
@@ -449,8 +420,8 @@ class TestHandleRatesMessage:
         assert "4,262.80" in reply.body
         assert "Wise" not in reply.body
         assert "4,277.50" not in reply.body
-        # No comparison summary when only one provider responds.
-        assert "top remittance quote pays" not in reply.body
+        # No best-vs-worst gap when only one provider responds.
+        assert "The difference between the best and worst is" not in reply.body
 
     def test_handles_unsupported_currency_gracefully(
         self, monkeypatch: pytest.MonkeyPatch
@@ -477,7 +448,8 @@ class TestHandleRatesMessage:
 
         assert reply.chart_url == "https://quickchart.io/chart?c=...&w=600"
         assert "Mexico" in reply.body
-        assert "you're sending" in reply.body
+        assert "converts like this" in reply.body
+        assert "The graph shows" in reply.body
 
     def test_no_chart_url_when_history_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
@@ -492,7 +464,8 @@ class TestHandleRatesMessage:
 
         assert reply.chart_url is None
         assert "Mexico" in reply.body
-        assert "you're sending" in reply.body
+        assert "converts like this" in reply.body
+        assert "The graph shows" not in reply.body
 
     def test_merges_monito_rows_as_distinct_providers(
         self, monkeypatch: pytest.MonkeyPatch
@@ -523,28 +496,14 @@ class TestHandleRatesMessage:
         assert "Wise" in reply.body
         assert "Western Union" in reply.body
 
-        provider_lines = [
-            line for line in reply.body.splitlines() if line.startswith("• ")
-        ]
-        # 1 default (open.er-api) + 3 remittance rows from Monito.
-        assert len(provider_lines) == 4
-        # The Best FX callout (its own line, not a bullet) names the top
-        # remittance row by USD-yield → Remitly at 17.20.
-        best_line = next(
-            line for line in reply.body.splitlines()
-            if line.startswith("🏆 *Best FX:")
-        )
-        assert "Remitly" in best_line
-        # The default bullet sits in its own block above the remittance list.
-        base_line = next(line for line in provider_lines if "open.er-api" in line)
-        assert "chart" in base_line
-        # Remittance bullets follow the default bullet, sorted best → worst.
-        remittance_lines = [
-            line for line in provider_lines if "open.er-api" not in line
-        ]
-        assert "Remitly" in remittance_lines[0]
-        assert "Wise" in remittance_lines[1]
-        assert "Western Union" in remittance_lines[2]
+        ranked = [line for line in reply.body.splitlines() if "→" in line]
+        # Four ranked rows (Remitly, Wise, open.er-api, WU) by all-in MXN received.
+        assert len(ranked) == 4
+        assert ranked[0].startswith("1️⃣") and "Remitly" in ranked[0]
+        assert ranked[1].startswith("2️⃣") and "Wise" in ranked[1]
+        assert ranked[2].startswith("3️⃣") and "open.er-api" in ranked[2]
+        assert "mid-market reference (chart)" in ranked[2]
+        assert ranked[3].startswith("4️⃣") and "Western Union" in ranked[3]
 
     def test_monito_passes_country_iso2_and_amount(
         self, monkeypatch: pytest.MonkeyPatch

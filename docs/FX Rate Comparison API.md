@@ -91,52 +91,54 @@ These dimensions can map to future API **query params** (e.g. `user_segment=new|
 The bot reply must be **all-in** (rate + fee already baked in — no surprises) and follow this structure:
 
 ```
-Hoy $<amount> dólares se convierten así (ya con todo incluido, sin sorpresas):
+Today $<amount> USD converts as follows (all-in, no surprises):
 
-1️⃣ <Provider> → $<pesos> pesos — <fee info>, tarda <delivery time>
-2️⃣ <Provider> → $<pesos> pesos — <fee info>, <delivery time>
+1️⃣ <Provider> → $<amount_mxn> MXN — <fee info>, <delivery time>
+2️⃣ <Provider> → $<amount_mxn> MXN — <fee info>, <delivery time>
 ...
 
-⚠️ <Worst provider> cobra $<fee> dólares extra y solo da $<pesos> pesos — la peor opción hoy.
+⚠️ <Worst provider> charges an extra $<fee> USD and only delivers $<amount_mxn> MXN — the worst option today.
 
-¿Qué te conviene?
+What works best for you?
 • *<Use case>*: <Provider>
-• *<Use case>*: <Provider> o <Provider>
+• *<Use case>*: <Provider> or <Provider>
 • *<Use case>*: <Provider>
 
-La diferencia entre el mejor y el peor es $<diff> pesos por cada $<amount> que envías.
+The gap between best and worst is $<diff> MXN per $<amount> you send.
 ```
 
 **Example output (USD 100 → MXN):**
 
 ```
-Hoy $100 dólares se convierten así (ya con todo incluido, sin sorpresas):
+Today $100 USD converts as follows (all-in, no surprises):
 
-1️⃣ MoneyGram → $1,778 pesos — gratis, tarda hasta 1 día
-2️⃣ Western Union → $1,760 pesos — gratis, en minutos
-3️⃣ Remitly → $1,758 pesos — gratis, en minutos
-4️⃣ Xoom → $1,752 pesos — gratis, tarda 2 días
-5️⃣ Félix → $1,740 pesos — gratis, en minutos, por WhatsApp
-6️⃣ Taptap Send → $1,716 pesos — gratis, en minutos
+1️⃣ MoneyGram → $1,778 MXN — free, up to 1 day
+2️⃣ Western Union → $1,760 MXN — free, in minutes
+3️⃣ Remitly → $1,758 MXN — free, in minutes
+4️⃣ Xoom → $1,752 MXN — free, 2 days
+5️⃣ Félix → $1,740 MXN — free, in minutes, via WhatsApp
+6️⃣ Taptap Send → $1,716 MXN — free, in minutes
 
-⚠️ XE cobra $3 dólares extra y solo da $1,656 pesos — la peor opción hoy.
+⚠️ XE charges an extra $3 USD and only delivers $1,656 MXN — the worst option today.
 
-¿Qué te conviene?
-• *Más pesos, puedes esperar un día*: MoneyGram
-• *Buen rate y al instante*: Western Union o Remitly
-• *Sin descargar nada, desde WhatsApp*: Félix
+What works best for you?
+• *Most pesos if you can wait a day*: MoneyGram
+• *Strong rate and instant*: Western Union or Remitly
+• *No app install, straight from WhatsApp*: Félix
 
-La diferencia entre el mejor y el peor es $122 pesos por cada $100 que envías.
+The gap between best and worst is $122 MXN per $100 you send.
 ```
 
 **Formatting rules:**
-- Rank providers by **all-in pesos received** (descending).
+- Rank providers by **all-in MXN received** (descending).
 - Use numbered emoji (1️⃣ 2️⃣ …) for each provider line.
-- Always show fee info inline: `gratis` or `cobra $X dólares`.
-- Delivery time: `en minutos`, `tarda hasta 1 día`, `tarda 2 días`, etc.
+- Always show fee info inline: `free` or `charges $X USD extra`.
+- Delivery time: `in minutes`, `up to 1 day`, `2 days`, etc.
 - ⚠️ section: call out the worst option explicitly with reason.
-- "¿Qué te conviene?" section: 2–3 bullets matching the user's likely priorities.
-- Closing line: absolute peso difference between best and worst option.
+- “What works best for you?” section: 2–3 bullets matching the user's likely priorities.
+- Closing line: absolute MXN difference between best and worst option.
+
+> **Localization:** Production copy for WhatsApp can mirror this structure in Spanish or other languages; keep the same fields and ordering for parity with the API.
 
 ---
 

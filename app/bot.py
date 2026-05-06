@@ -5,6 +5,8 @@ Default demo replies with a fixed template that quotes what they sent. Replace
 ``handle_inbound`` with LLM flows, payments, or state machines — keep it async.
 """
 
+from __future__ import annotations
+
 from app.schemas.kapso import KapsoMessage
 from app.services.kapso_client import KapsoClient
 from app.services.rates_service import (
@@ -24,6 +26,25 @@ _HELP_TRIGGERS: frozenset[str] = frozenset(
         "info",
     }
 )
+
+# Meta WhatsApp Cloud API: image (and other media) captions max out at 1024 chars.
+_WHATSAPP_IMAGE_CAPTION_MAX_CHARS = 1024
+
+
+def chart_reply_media_parts(body: str) -> tuple[str, str | None]:
+    """Return *(caption, follow_up_text)* for sending a chart image.
+
+    If *body* fits one caption, *follow_up_text* is *None*. Otherwise the chart
+    uses a short caption and the full comparison is sent as a second message so
+    nothing is truncated and the graph is always delivered.
+    """
+    if len(body) <= _WHATSAPP_IMAGE_CAPTION_MAX_CHARS:
+        return body, None
+    return (
+        "📊 *7-day USD spot trend* — your full comparison is in the next message.",
+        body,
+    )
+
 
 HELP_MESSAGE = (
     "📖 *Help*\n\n"
@@ -93,13 +114,15 @@ async def handle_inbound(msg: KapsoMessage, client: KapsoClient) -> None:
     if is_rates_request(text) or is_awaiting_rates_input(msg.phone_number):
         reply = await handle_rates_message(msg.phone_number, text)
         if reply.chart_url:
-            # Image with the quote text as caption — single, cohesive WhatsApp message.
+            caption, follow_up = chart_reply_media_parts(reply.body)
             await client.send_media_message(
                 msg.phone_number,
                 "image",
                 reply.chart_url,
-                caption=reply.body,
+                caption=caption,
             )
+            if follow_up:
+                await client.send_whatsapp_message(msg.phone_number, follow_up)
         else:
             await client.send_whatsapp_message(msg.phone_number, reply.body)
         return

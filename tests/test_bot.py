@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.bot import HELP_MESSAGE, is_help_request
+from app.bot import HELP_MESSAGE, chart_reply_media_parts, is_help_request
 
 
 class TestHelpCommand:
@@ -31,3 +31,20 @@ class TestHelpCommand:
     def test_help_message_is_non_empty_english(self) -> None:
         assert "Help" in HELP_MESSAGE
         assert "USD" in HELP_MESSAGE
+
+
+class TestChartReplyMediaParts:
+    def test_single_message_when_caption_fits(self) -> None:
+        base = "Mexico quote\n" + ("x" * 500)
+        cap, follow = chart_reply_media_parts(base)
+        assert cap == base
+        assert follow is None
+
+    def test_splits_when_over_whatsapp_caption_limit(self) -> None:
+        body = "y" * 1100
+        cap, follow = chart_reply_media_parts(body)
+        assert len(cap) <= 1024
+        assert follow == body
+        assert "next message" in cap
+
+
