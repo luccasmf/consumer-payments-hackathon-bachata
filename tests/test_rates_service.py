@@ -32,10 +32,20 @@ SAMPLE_RESULTS: list[FxProviderResult] = [
         {"USD": 1.0, "MXN": 17.0512, "COP": 3925.4, "BRL": 5.12},
         is_base=True,
     ),
+    # Representative second provider — shape mirrors what
+    # ``fetch_monito_quotes`` produces (single-currency rates dict, no
+    # is_base). Named after a real Monito row for realism.
     _make_result(
-        "exchangerate-api",
-        {"USD": 1.0, "MXN": 17.1100, "COP": 3920.0, "BRL": 5.15},
+        "Wise",
+        {"MXN": 17.1100, "COP": 3920.0, "BRL": 5.15},
     ),
+]
+
+# Default + two remittance feeds so spread copy exercises the multi-remittance path.
+THREE_REMITTANCE_RESULTS: list[FxProviderResult] = [
+    SAMPLE_RESULTS[0],
+    SAMPLE_RESULTS[1],
+    _make_result("low-tier-api", {"USD": 1.0, "MXN": 17.0000, "COP": 3900.0}),
 ]
 
 
@@ -80,6 +90,20 @@ def _stub_chart(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rates_service, "get_history_chart_url", fake)
 
 
+@pytest.fixture(autouse=True)
+def _stub_monito(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Default: pretend Monito returned no rows. Real Monito calls drive a
+    Chromium scrape and must never run in tests. Override per-test with
+    :func:`_stub_monito_results` to inject canned rows.
+    """
+
+    async def fake(*_: Any, **__: Any) -> list[FxProviderResult]:
+        return []
+
+    monkeypatch.setattr(rates_service, "fetch_monito_quotes", fake)
+
+
 def _stub_fetch_all(
     monkeypatch: pytest.MonkeyPatch, results: list[FxProviderResult]
 ) -> None:
@@ -87,6 +111,15 @@ def _stub_fetch_all(
         return list(results)
 
     monkeypatch.setattr(rates_service, "fetch_all_quotes", fake)
+
+
+def _stub_monito_results(
+    monkeypatch: pytest.MonkeyPatch, results: list[FxProviderResult]
+) -> None:
+    async def fake(*_: Any, **__: Any) -> list[FxProviderResult]:
+        return list(results)
+
+    monkeypatch.setattr(rates_service, "fetch_monito_quotes", fake)
 
 
 def _stub_chart_url(monkeypatch: pytest.MonkeyPatch, url: str | None) -> None:
@@ -159,17 +192,27 @@ class TestFormatQuoteMessage:
         assert comparison is not None
         message = rates_service.format_comparison_response(comparison)
 
-        assert "Quote — Mexico" in message
+        assert "Mexico" in message
+        assert "converts like this" in message
         assert "250.00 USD" in message
-        # Both providers and both conversion totals show up.
-        assert "open.er-api" in message
-        assert "exchangerate-api" in message
-        # 250 * 17.0512 = 4262.80 ; 250 * 17.11 = 4277.50
         assert "4,262.80" in message
         assert "4,277.50" in message
-        # Spread shown when 2+ providers present.
-        assert "Spread" in message
+        assert rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in message
+        assert "open.er-api" not in message
+        assert "Wise" in message
+        assert "Remittance estimates" in message
+        assert "1️⃣" in message
+        assert "What works best for you?" in message
+        # Only one remittance row → no best-vs-worst gap among remittance quotes.
+        assert "The difference between the best and worst is" not in message
         assert "2026-05-06 16:44" in message
+
+    def test_three_feeds_gap_uses_best_minus_worst_total(self) -> None:
+        message = rates_service.format_quote_message(
+            "Mexico", "MXN", 250.0, THREE_REMITTANCE_RESULTS
+        )
+        # Remittance: Wise 4277.5, low-tier 4250.0 — gap 27.50 (spot reference excluded)
+        assert "27.50" in message
 
     def test_highlights_the_best_rate(self) -> None:
         message = rates_service.format_quote_message(
@@ -177,19 +220,14 @@ class TestFormatQuoteMessage:
         )
         lines = message.splitlines()
 
-        provider_lines = [line for line in lines if line.startswith("• ")]
-        # 17.11 > 17.0512 → exchangerate-api should be on top with the badge.
-        assert "exchangerate-api" in provider_lines[0]
-        assert "🏆" in provider_lines[0]
-        assert "BEST" in provider_lines[0]
-        assert "open.er-api" in provider_lines[1]
-        assert "🏆" not in provider_lines[1]
+        arrow_lines = [line for line in lines if "→" in line]
+        assert arrow_lines[0].startswith("*General exchange price*")
+        assert "4,262.80" in arrow_lines[0]
+        assert arrow_lines[1].startswith("1️⃣") and "Wise" in arrow_lines[1]
+        assert "4,277.50" in arrow_lines[1]
 
-        # Summary line with savings vs. worst quote.
-        # extra = 250 * (17.1100 - 17.0512) = 14.70
-        assert "Best deal" in message
-        assert "exchangerate-api" in message
-        assert "14.70" in message
+        assert "Wise" in message
+        assert "⚠️" not in message
 
     def test_skips_providers_missing_target_currency(self) -> None:
         partial = [
@@ -198,13 +236,11 @@ class TestFormatQuoteMessage:
         ]
         message = rates_service.format_quote_message("Mexico", "MXN", 100.0, partial)
 
+        assert "1,700.00" in message
         assert "alpha" in message
         assert "beta" not in message
-        # With only one quote remaining we shouldn't print spread/best-deal lines.
-        assert "Spread" not in message
-        assert "Best deal" not in message
-        # And there's no badge to award when there's nothing to compare.
-        assert "🏆" not in message
+        assert "The difference between the best and worst is" not in message
+        assert "1️⃣ *alpha*" in message
 
     def test_returns_friendly_message_when_no_provider_has_currency(self) -> None:
         none_match = [_make_result("alpha", {"BRL": 5.0})]
@@ -216,30 +252,37 @@ class TestFormatQuoteMessage:
         message = rates_service.format_quote_message(
             "Mexico", "MXN", 250.0, SAMPLE_RESULTS
         )
-        provider_lines = [line for line in message.splitlines() if line.startswith("• ")]
-
-        # open.er-api is our base → that line carries the "base" tag.
-        base_line = next(line for line in provider_lines if "open.er-api" in line)
-        secondary_line = next(
-            line for line in provider_lines if "exchangerate-api" in line
+        base_line = next(
+            line
+            for line in message.splitlines()
+            if rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in line
         )
-        assert "📍" in base_line
-        assert "base" in base_line
-        assert "📍" not in secondary_line
+        secondary_line = next(line for line in message.splitlines() if "Wise" in line)
 
-    def test_base_and_best_can_coexist_on_same_line(self) -> None:
-        # Flip the rates so the base provider is also the best.
+        assert "mid-market reference (chart)" in base_line
+        assert "mid-market reference (chart)" not in secondary_line
+
+    def test_default_spot_can_outrank_remittance_but_best_callout_is_remittance_only(
+        self,
+    ) -> None:
+        # Stronger spot rate than the secondary remittance feed.
         results = [
             _make_result("open.er-api", {"MXN": 17.5}, is_base=True),
-            _make_result("exchangerate-api", {"MXN": 17.0}),
+            _make_result("Wise", {"MXN": 17.0}),
         ]
         message = rates_service.format_quote_message("Mexico", "MXN", 100.0, results)
-        first_line = next(
-            line for line in message.splitlines() if line.startswith("• ")
+        default_line = next(
+            line
+            for line in message.splitlines()
+            if rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in line
         )
-        assert "open.er-api" in first_line
-        assert "BEST" in first_line
-        assert "base" in first_line
+        assert "1,750.00" in default_line
+        assert "mid-market reference (chart)" in default_line
+
+        wise_line = next(
+            line for line in message.splitlines() if line.startswith("1️⃣") and "Wise" in line
+        )
+        assert "1,700.00" in wise_line
 
 
 class TestHandleRatesMessage:
@@ -268,8 +311,11 @@ class TestHandleRatesMessage:
         )
 
         assert "Mexico" in reply.body
-        assert "open.er-api" in reply.body
-        assert "exchangerate-api" in reply.body
+        assert rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in reply.body
+        assert "open.er-api" not in reply.body
+        assert "Wise" in reply.body
+        assert "4,262.80" in reply.body
+        assert "4,277.50" in reply.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
     def test_one_shot_message_with_keyword_country_and_amount(
@@ -321,9 +367,9 @@ class TestHandleRatesMessage:
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
 
         reply3 = asyncio.run(rates_service.handle_rates_message(self.PHONE, "250"))
-        assert "Quote — Mexico" in reply3.body
+        assert "Mexico" in reply3.body
+        assert "converts like this" in reply3.body
         assert "MXN" in reply3.body
-        assert "open.er-api" in reply3.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
     def test_split_turns_amount_then_country(
@@ -341,7 +387,7 @@ class TestHandleRatesMessage:
         reply3 = asyncio.run(
             rates_service.handle_rates_message(self.PHONE, "Mexico")
         )
-        assert "Quote — Mexico" in reply3.body
+        assert "Mexico" in reply3.body
         assert "250.00 USD" in reply3.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
@@ -355,7 +401,7 @@ class TestHandleRatesMessage:
         asyncio.run(rates_service.handle_rates_message(self.PHONE, "Brazil"))
         reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "100"))
 
-        assert "Quote — Brazil" in reply.body
+        assert "Brazil" in reply.body
         assert "Mexico" not in reply.body
         assert "BRL" in reply.body
 
@@ -383,9 +429,13 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
-        assert "open.er-api" in reply.body
-        assert "exchangerate-api" not in reply.body
-        assert "Spread" not in reply.body
+        assert rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in reply.body
+        assert "open.er-api" not in reply.body
+        assert "4,262.80" in reply.body
+        assert "Wise" not in reply.body
+        assert "4,277.50" not in reply.body
+        # No best-vs-worst gap when only one provider responds.
+        assert "The difference between the best and worst is" not in reply.body
 
     def test_handles_unsupported_currency_gracefully(
         self, monkeypatch: pytest.MonkeyPatch
@@ -411,7 +461,9 @@ class TestHandleRatesMessage:
         )
 
         assert reply.chart_url == "https://quickchart.io/chart?c=...&w=600"
-        assert "Quote — Mexico" in reply.body
+        assert "Mexico" in reply.body
+        assert "converts like this" in reply.body
+        assert "The graph shows" in reply.body
 
     def test_no_chart_url_when_history_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
@@ -425,7 +477,68 @@ class TestHandleRatesMessage:
         )
 
         assert reply.chart_url is None
-        assert "Quote — Mexico" in reply.body
+        assert "Mexico" in reply.body
+        assert "converts like this" in reply.body
+        assert "The graph shows" not in reply.body
+
+    def test_merges_monito_rows_as_distinct_providers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Monito results are stitched in alongside the API providers.
+
+        Each Monito row (Remitly, Wise, Western Union, …) becomes its own
+        line in the reply with its own rate.
+        """
+        _stub_fetch_all(monkeypatch, [SAMPLE_RESULTS[0]])  # only open.er-api
+        _stub_monito_results(
+            monkeypatch,
+            [
+                _make_result("Remitly", {"MXN": 17.20}),
+                _make_result("Wise", {"MXN": 17.15}),
+                _make_result("Western Union", {"MXN": 16.90}),
+            ],
+        )
+        rates_service._mark_pending(self.PHONE)
+
+        reply = asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Mexico 250")
+        )
+
+        # Reference row + three remittance rows (Monito); upstream API name hidden.
+        assert rates_service.DEFAULT_FX_PROVIDER_DISPLAY_NAME in reply.body
+        assert "open.er-api" not in reply.body
+        assert "Remitly" in reply.body
+        assert "Wise" in reply.body
+        assert "Western Union" in reply.body
+
+        ranked = [line for line in reply.body.splitlines() if "→" in line]
+        assert len(ranked) == 4
+        assert ranked[0].startswith("*General exchange price*")
+        assert "mid-market reference (chart)" in ranked[0]
+        assert ranked[1].startswith("1️⃣") and "Remitly" in ranked[1]
+        assert ranked[2].startswith("2️⃣") and "Wise" in ranked[2]
+        assert ranked[3].startswith("3️⃣") and "Western Union" in ranked[3]
+
+    def test_monito_passes_country_iso2_and_amount(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The service maps currency code → ISO2 country before scraping."""
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
+
+        captured: list[tuple[Any, ...]] = []
+
+        async def fake_monito(*args: Any, **kwargs: Any) -> list[FxProviderResult]:
+            captured.append(args)
+            return []
+
+        monkeypatch.setattr(rates_service, "fetch_monito_quotes", fake_monito)
+        rates_service._mark_pending(self.PHONE)
+
+        asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Brazil 100")
+        )
+
+        assert captured == [("br", 100.0, "BRL")]
 
 
 # Smoke test that an old import path doesn't accidentally come back.

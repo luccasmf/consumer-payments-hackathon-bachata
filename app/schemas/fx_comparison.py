@@ -28,15 +28,21 @@ class FxComparisonResponse(BaseModel):
     quotes: list[FxProviderQuote] = Field(default_factory=list)
     best_provider: str | None = Field(
         default=None,
-        description="Provider with the highest total_received for this corridor",
+        description=(
+            "Best remittance provider (highest total_received among non–open.er-api quotes); "
+            "None if only the default FX feed is available."
+        ),
     )
     spread_rate: float | None = Field(
         default=None,
-        description="max(rate_per_usd) − min(rate_per_usd) when two or more quotes exist",
+        description=(
+            "Among remittance quotes only: max(rate_per_usd) − min(rate_per_usd) when "
+            "two or more remittance quotes exist"
+        ),
     )
     advantage_vs_worst: float | None = Field(
         default=None,
-        description="Extra destination currency vs the worst quote (amount_usd × spread_rate)",
+        description="Extra destination currency vs worst remittance (amount_usd × spread_rate)",
     )
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(UTC),

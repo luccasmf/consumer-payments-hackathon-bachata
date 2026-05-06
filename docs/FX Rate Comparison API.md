@@ -13,7 +13,7 @@ generated_by: cursor-agent
 
 # FX Rate Comparison API
 
-Hackathon product note: an **API that compares FX rates / all-in costs** across remittance providers using public data (websites and, where relevant, Google search as part of discovery — not as the single source of truth).
+Hackathon product note: an **API that compares FX rates** across remittance providers using public data (websites and, where relevant, Google search as part of discovery — not as the single source of truth).
 
 **Relationship to this repo:** the backend remains FastAPI + WhatsApp via Kapso; this API can power replies from the bot in `app/bot.py`. See also [`AGENTS.md`](../AGENTS.md).
 
@@ -23,10 +23,28 @@ Hackathon product note: an **API that compares FX rates / all-in costs** across 
 
 | Aspect | Detail |
 |--------|--------|
-| **Goal** | Serve **apples-to-apples** FX comparisons across providers (same usage scenario). |
-| **Input** | Scenario parameters: user type, amount, corridors/currency pairs as we define them. |
-| **Output** | Comparable JSON (rate, fee, estimated total cost, timestamp, provider). |
-| **Data** | Controlled scraping of provider sites + normalization; **browser-use** to automate browsing when HTML is dynamic. |
+| **Goal** | Serve **apples-to-apples** FX comparisons across providers (same corridor + USD send amount). |
+| **Input** | Destination (country → ISO currency) + **amount in USD** (multi-turn WhatsApp flow). |
+| **Output** | Normalized comparison (`FxComparisonResponse`) + WhatsApp text; optional **7-day USD→currency chart** image. |
+| **Data** | Rate-table HTTP feeds (**open.er-api**, Felix public endpoint) + **Monito compare** scrape (Playwright) per supported corridor. |
+
+---
+
+## Implementation in this repository
+
+These notes track what **actually ships** in the hackathon codebase (May 2026):
+
+| Piece | Location / behavior |
+|--------|---------------------|
+| **Conversation** | Two-turn flow in `app/services/rates_service.py`: `_RATE_KEYWORDS` routes messages (*rate*, *rates*, *fx*, *exchange*, *tasa*, *tasas*, *cambio*, *tipo de cambio*, *cotizacion*, *cotización*) → prompt for **country + USD amount**; user can answer in one message (*Mexico 250*) or split across messages. State is **in-memory per phone** (`_pending_rates`). |
+| **Featured corridors** | Mexico (MXN), Colombia (COP), Guatemala (GTQ), Honduras (HNL), Dominican Republic (DOP), Brazil (BRL) — see `_FEATURED_CORRIDORS` and `_COUNTRY_ALIASES`. |
+| **Rate-table providers** | `app/services/rates_providers/__init__.py`: **Spot anchor** via `OpenErApiProvider` ([open.er-api.com](https://open.er-api.com)) — internal id `open.er-api`, user label **General exchange price** — plus **Felix** public rates (`FelixPagoPublicProvider`). |
+| **Remittance rows** | For currencies listed in `_CURRENCY_TO_ISO2`, `fetch_monito_quotes` adds **one row per Monito compare provider** (Remitly, Wise, WU, … depending on Monito). Other currencies still get the reference + Felix lines only. |
+| **Caching** | When **Upstash Redis** is configured (`REDIS_URL` + `REDIS_TOKEN` in `.env`, via `app/services/redis_client.py`), full comparisons are cached **300 seconds** under `fx:comparison:<currency>:<amount_normalized>` (amount rounded to cents in the key). |
+| **Chart** | `get_history_chart_url` (see `app/services/rates_history.py`) builds a **7-day** USD→currency trend using historical spots from **fawazahmed0/currency-api** on jsDelivr, rendered via **QuickChart**. The bot sends it as an **image** with the comparison as caption; if the body exceeds Meta’s **1024**-character image-caption limit, caption is shortened and the full text follows in a second message (`chart_reply_media_parts` in `app/bot.py`). |
+| **Structured model** | `app/schemas/fx_comparison.py` — `FxComparisonResponse` with `best_provider` (top remittance by `total_received`). **`spread_rate`** = max − min `rate_per_usd` among remittance quotes when ≥2 exist; **`advantage_vs_worst`** = `amount_usd × spread_rate`. Both exclude the default spot feed (`open.er-api`). The WhatsApp gap line uses **best − worst `total_received`**, which matches that spread when best/worst are the rate extremes. |
+
+**HTTP endpoint (debug / integration):** `POST /api/monito/compare` — body `MonitoCompareRequest`: `country` (ISO alpha-2, e.g. `mx`), `amount` (>0), optional `receive_currency` (ISO 4217), optional `top` (cap rows, `0` = all). Runs the Monito Playwright scrape only (can take tens of seconds; requires Chromium). There is no separate public `GET /compare` for the full bundled comparison yet; the **primary surface is WhatsApp** via `handle_rates_message`.
 
 ---
 
@@ -71,8 +89,9 @@ These dimensions can map to future API **query params** (e.g. `user_segment=new|
    - **browser-use** (or similar orchestration) to turn browser interaction into reproducible steps behind HTTP endpoints.
 
 2. **API layer**  
-   - FastAPI: endpoints such as `GET /compare` or `POST /quote` returning normalized comparisons.  
-   - Short TTL cache + timestamps to avoid hammering third-party sites.
+   - FastAPI: operational routes under `/api` (e.g. `POST /api/monito/compare` for raw Monito rows).  
+   - Full comparison + Redis TTL + chart wiring live in **`rates_service`** for the bot path.  
+   - Short TTL cache + UTC timestamps on rendered messages.
 
 3. **“Information on Google”**  
    - Reasonable use: find official URLs, support numbers, or **official** rate pages.  
@@ -82,61 +101,74 @@ These dimensions can map to future API **query params** (e.g. `user_segment=new|
 
 ## WhatsApp integration (hackathon)
 
-- The user sends **origin/destination country, amount, profile** (new vs returning if we capture it) over WhatsApp.  
-- The bot calls comparison logic (local or internal service) and replies with a **short ranking** and disclaimers.  
-- Canonical message handling: [`app/bot.py`](../app/bot.py).
+- The user triggers the flow with **rate-related keywords** (English or Spanish); the bot asks for **destination country** and **USD amount** if either is missing.  
+- Parsed quotes compare **remittance estimates** (Monito rows when available) against a **mid-market reference** line from the default spot feed (**General exchange price**).  
+- Canonical handlers: [`app/bot.py`](../app/bot.py) → [`app/services/rates_service.py`](../app/services/rates_service.py).
 
-### Bot reply format
+### Bot reply format (implemented)
 
-The bot reply must be **all-in** (rate + fee already baked in — no surprises) and follow this structure:
+Rendered by `format_comparison_response` — **all-in estimates**, destination currency varies by corridor (not hard-coded to MXN):
 
 ```
-Hoy $<amount> dólares se convierten así (ya con todo incluido, sin sorpresas):
+Today *$<amount> USD* to *<Country>* (*<CODE>*) converts like this — all-in, no surprises:
 
-1️⃣ <Provider> → $<pesos> pesos — <fee info>, tarda <delivery time>
-2️⃣ <Provider> → $<pesos> pesos — <fee info>, <delivery time>
+*General exchange price* → *<total> <CODE>* — mid-market reference (chart)
+
+*Remittance estimates*
+
+1️⃣ *<Provider>* → *<total> <CODE>* — all-in estimate
+2️⃣ *<Provider>* → ...
 ...
 
-⚠️ <Worst provider> cobra $<fee> dólares extra y solo da $<pesos> pesos — la peor opción hoy.
+⚠️ *<Worst provider>* delivers the least today — *<total> <CODE>* for this send amount.
 
-¿Qué te conviene?
-• *<Use case>*: <Provider>
-• *<Use case>*: <Provider> o <Provider>
-• *<Use case>*: <Provider>
+*What works best for you?*
+• *Most <CODE> received*: <Provider>
+• *Next best*: <Provider>
+• (*Third bullet*: also competitive, or WhatsApp/Félix highlight when relevant)
 
-La diferencia entre el mejor y el peor es $<diff> pesos por cada $<amount> que envías.
+The difference between the best and worst is *<diff> <CODE>* per *<amount> USD* you send.
+
+_Updated YYYY-MM-DD HH:MM UTC (cached)_
 ```
 
-**Example output (USD 100 → MXN):**
+When a chart is generated, the bot appends a short **📊** footer explaining the 7-day USD→currency trend (mid-market baseline).
+
+**Formatting rules (current code):**
+
+- **Reference line:** one row for **General exchange price** (open.er-api), labeled mid-market / chart — **not** mixed into the numbered remittance ranking.  
+- **Remittance block:** sorted by **total received in destination currency** (best first). Lines use emoji ranks **1️⃣–🔟**, then plain numerals beyond ten.  
+- Each remittance line ends with **— all-in estimate** (fee and delivery are **not** broken out per row yet — that richer copy remains a product stretch goal).  
+- **⚠️** calls out the **lowest remittance total** for the corridor.  
+- **Quick picks:** up to three bullets (`Most … received`, `Next best`, optional third).  
+- **Spread line:** absolute **destination-currency** gap between best and worst **remittance** quote.  
+- **Footer:** `_Updated … UTC_` plus ` (cached)` when served from Redis.
+
+### Richer copy (product target, not yet in code)
+
+A future iteration can mirror marketing-style lines (**fee**, **delivery SLA**) per provider when we have reliable structured fields. Until then, treat Monito-derived amounts as **single-number estimates**:
 
 ```
-Hoy $100 dólares se convierten así (ya con todo incluido, sin sorpresas):
-
-1️⃣ MoneyGram → $1,778 pesos — gratis, tarda hasta 1 día
-2️⃣ Western Union → $1,760 pesos — gratis, en minutos
-3️⃣ Remitly → $1,758 pesos — gratis, en minutos
-4️⃣ Xoom → $1,752 pesos — gratis, tarda 2 días
-5️⃣ Félix → $1,740 pesos — gratis, en minutos, por WhatsApp
-6️⃣ Taptap Send → $1,716 pesos — gratis, en minutos
-
-⚠️ XE cobra $3 dólares extra y solo da $1,656 pesos — la peor opción hoy.
-
-¿Qué te conviene?
-• *Más pesos, puedes esperar un día*: MoneyGram
-• *Buen rate y al instante*: Western Union o Remitly
-• *Sin descargar nada, desde WhatsApp*: Félix
-
-La diferencia entre el mejor y el peor es $122 pesos por cada $100 que envías.
+1️⃣ <Provider> → $<amount> MXN — free, in minutes
 ```
 
-**Formatting rules:**
-- Rank providers by **all-in pesos received** (descending).
-- Use numbered emoji (1️⃣ 2️⃣ …) for each provider line.
-- Always show fee info inline: `gratis` or `cobra $X dólares`.
-- Delivery time: `en minutos`, `tarda hasta 1 día`, `tarda 2 días`, etc.
-- ⚠️ section: call out the worst option explicitly with reason.
-- "¿Qué te conviene?" section: 2–3 bullets matching the user's likely priorities.
-- Closing line: absolute peso difference between best and worst option.
+---
+
+### Example (illustrative — richer UX target)
+
+The following block shows the **intended** density of information once fee + speed are available from scrapers or APIs; it does **not** match the current bot string verbatim:
+
+```
+Today $100 USD converts as follows (all-in, no surprises):
+
+1️⃣ MoneyGram → $1,778 MXN — free, up to 1 day
+...
+⚠️ XE charges an extra $3 USD and only delivers $1,656 MXN — the worst option today.
+...
+The gap between best and worst is $122 MXN per $100 you send.
+```
+
+> **Localization:** WhatsApp copy can follow the same block structure in Spanish; keep ordering aligned with `FxComparisonResponse` fields for API parity.
 
 ---
 

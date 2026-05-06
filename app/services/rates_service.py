@@ -19,6 +19,7 @@ WhatsApp message with the comparison + visual.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -29,12 +30,21 @@ from pydantic import ValidationError
 
 from app.schemas.fx_comparison import FxComparisonResponse, FxProviderQuote
 from app.services.rates_history import get_history_chart_url
-from app.services.rates_providers import FxProviderResult, fetch_all_quotes
+from app.services.rates_providers import (
+    FxProviderResult,
+    fetch_all_quotes,
+    fetch_monito_quotes,
+)
 from app.services.redis_client import RedisStorageClient, get_redis_storage_client
 
 logger = logging.getLogger(__name__)
 
 FX_QUOTE_CACHE_TTL_SECONDS = 300
+
+# Canonical spot / chart anchor (see ``OpenErApiProvider``). Internal id matches
+# ``OpenErApiProvider.name``; users see :data:`DEFAULT_FX_PROVIDER_DISPLAY_NAME` instead.
+DEFAULT_FX_PROVIDER_NAME = "open.er-api"
+DEFAULT_FX_PROVIDER_DISPLAY_NAME = "General exchange price"
 
 
 @dataclass(frozen=True)
@@ -86,8 +96,9 @@ def build_fx_comparison_from_providers(
 ) -> FxComparisonResponse | None:
     """Build a structured comparison from raw provider results (ordered like ``results``).
 
-    Carries ``is_base`` through onto each :class:`FxProviderQuote` so the
-    formatter can highlight the base / reference provider in the reply.
+    Carries ``is_base`` through onto each :class:`FxProviderQuote`. Best quote /
+    spread metrics apply to **remittance** providers only (excluding the default
+    spot feed: :data:`DEFAULT_FX_PROVIDER_NAME`).
     """
     quotes: list[FxProviderQuote] = []
     ts = timestamp or datetime.now(UTC)
@@ -105,23 +116,94 @@ def build_fx_comparison_from_providers(
         )
     if not quotes:
         return None
-    best = max(quotes, key=lambda q: q.total_received)
+
+    remittance = [q for q in quotes if q.provider != DEFAULT_FX_PROVIDER_NAME]
+    best_remittance = (
+        max(remittance, key=lambda q: q.total_received) if remittance else None
+    )
     spread_rate: float | None = None
     advantage: float | None = None
-    if len(quotes) > 1:
-        rates_only = [q.rate_per_usd for q in quotes]
+    if len(remittance) > 1:
+        rates_only = [q.rate_per_usd for q in remittance]
         spread_rate = max(rates_only) - min(rates_only)
         advantage = amount_usd * spread_rate
+
     return FxComparisonResponse(
         destination_country=destination_country,
         currency_code=currency_code,
         amount_usd=amount_usd,
         quotes=quotes,
-        best_provider=best.provider,
+        best_provider=best_remittance.provider if best_remittance else None,
         spread_rate=spread_rate,
         advantage_vs_worst=advantage,
         timestamp=ts,
     )
+
+
+def _provider_display_name(provider: str) -> str:
+    """User-facing label; the base spot feed is not branded as the upstream API name."""
+    if provider == DEFAULT_FX_PROVIDER_NAME:
+        return DEFAULT_FX_PROVIDER_DISPLAY_NAME
+    return provider
+
+
+def _rank_number_emoji(index: int) -> str:
+    """1️⃣ … 🔟 for the first ten rows; plain digits after that."""
+    glyphs = (
+        "1️⃣",
+        "2️⃣",
+        "3️⃣",
+        "4️⃣",
+        "5️⃣",
+        "6️⃣",
+        "7️⃣",
+        "8️⃣",
+        "9️⃣",
+        "🔟",
+    )
+    if index < len(glyphs):
+        return glyphs[index]
+    return f"{index + 1}."
+
+
+def _quick_pick_bullets(
+    response: FxComparisonResponse,
+    ranked_remittance: list[FxProviderQuote],
+) -> list[str]:
+    """2–3 English bullets aligned with the product doc (priorities / picks).
+
+    ``ranked_remittance`` is remittance-only (excludes the default spot quote).
+    """
+    if not ranked_remittance:
+        return [
+            f"• *{DEFAULT_FX_PROVIDER_DISPLAY_NAME}* is the mid-market reference — "
+            "no remittance quotes came back for this corridor."
+        ]
+
+    lines_out: list[str] = [
+        f"• *Most {response.currency_code} received*: "
+        f"{_provider_display_name(ranked_remittance[0].provider)}",
+    ]
+    if len(ranked_remittance) >= 2:
+        lines_out.append(
+            f"• *Next best*: {_provider_display_name(ranked_remittance[1].provider)}"
+        )
+    if len(lines_out) < 3 and len(ranked_remittance) >= 3:
+        third = ranked_remittance[2]
+        lines_out.append(f"• *Also competitive*: {_provider_display_name(third.provider)}")
+    elif len(lines_out) < 3:
+        felix_q = next(
+            (q for q in ranked_remittance if "felix" in q.provider.lower()),
+            None,
+        )
+        top_names = {
+            ranked_remittance[i].provider for i in range(min(2, len(ranked_remittance)))
+        }
+        if felix_q is not None and felix_q.provider not in top_names:
+            lines_out.append(
+                f"• *On WhatsApp*: {_provider_display_name(felix_q.provider)}"
+            )
+    return lines_out[:3]
 
 
 def format_comparison_response(
@@ -131,10 +213,11 @@ def format_comparison_response(
 ) -> str:
     """Render WhatsApp body text from a structured comparison.
 
-    Quotes are sorted *best-first* (highest ``total_received``). The top
-    line carries a ``🏆 *BEST*`` badge when there's something to compare
-    against, and any quote from the base / reference provider gets a
-    ``📍 *base*`` tag. Multiple tags can coexist on the same line.
+    English layout aligned with ``docs/FX Rate Comparison API.md``: intro,
+    optional default spot line (:data:`DEFAULT_FX_PROVIDER_DISPLAY_NAME`),
+    numbered remittance rows (best→worst), explicit worst remittance callout,
+    quick picks, and best-vs-worst gap among remittance quotes; trailing UTC
+    timestamp.
     """
     if not response.quotes:
         return (
@@ -142,55 +225,78 @@ def format_comparison_response(
             f"({response.currency_code}) from any provider right now. Try again in a moment."
         )
 
-    sorted_quotes = sorted(
-        response.quotes, key=lambda q: q.total_received, reverse=True
+    reference_q = next(
+        (q for q in response.quotes if q.provider == DEFAULT_FX_PROVIDER_NAME),
+        None,
     )
-    has_comparison = len(sorted_quotes) > 1
-    best = sorted_quotes[0]
-
-    header = (
-        "*Provider quotations* (best first):"
-        if has_comparison
-        else "*Provider quotation:*"
-    )
-    lines = [
-        f"💱 *Quote — {response.destination_country}*",
-        f"Sending {response.amount_usd:,.2f} USD",
-        "",
-        header,
+    remittance = [
+        q for q in response.quotes if q.provider != DEFAULT_FX_PROVIDER_NAME
     ]
-    for index, quote in enumerate(sorted_quotes):
-        # Tags appended to a provider line. Multiple can coexist (e.g. the
-        # base provider also being the BEST quote on a given day).
-        tags: list[str] = []
-        if has_comparison and index == 0:
-            tags.append("🏆 *BEST*")
-        if quote.is_base:
-            tags.append("📍 *base*")
-        suffix = (" " + " ".join(tags)) if tags else ""
-        lines.append(
-            f"• *{quote.provider}*: {quote.total_received:,.2f} {response.currency_code} "
-            f"_(1 USD = {quote.rate_per_usd:,.4f})_{suffix}"
-        )
+    ranked_remittance = sorted(
+        remittance,
+        key=lambda q: q.total_received,
+        reverse=True,
+    )
 
-    if has_comparison:
-        worst = sorted_quotes[-1]
-        # Prefer numbers carried on the response (server-computed); fall
-        # back to recomputing from the quotes if a cached entry doesn't
-        # have them set yet.
-        spread_rate = response.spread_rate
-        if spread_rate is None:
-            spread_rate = best.rate_per_usd - worst.rate_per_usd
-        extra = response.advantage_vs_worst
-        if extra is None:
-            extra = response.amount_usd * spread_rate
+    lines = [
+        (
+            f"Today *${response.amount_usd:,.2f} USD* to "
+            f"*{response.destination_country}* (*{response.currency_code}*) "
+            f"converts like this:"
+        ),
+        "",
+    ]
+
+    if reference_q:
+        lines.append(
+            f"*{DEFAULT_FX_PROVIDER_DISPLAY_NAME}* → "
+            f"*{reference_q.total_received:,.2f} {response.currency_code}* "
+            "— mid-market reference (chart)"
+        )
+        lines.append("")
+
+    if ranked_remittance:
+        lines.append("*Remittance estimates*")
+        lines.append("")
+        for i, quote in enumerate(ranked_remittance):
+            prefix = _rank_number_emoji(i)
+            suffix = ""
+            if "felix" in quote.provider.lower():
+                suffix = " — instant via WhatsApp 💬"
+            lines.append(
+                f"{prefix} *{quote.provider}* → "
+                f"*{quote.total_received:,.2f} {response.currency_code}*"
+                f"{suffix}"
+            )
+
+    if len(ranked_remittance) >= 2:
+        best = ranked_remittance[0]
+        worst = ranked_remittance[-1]
         lines.append("")
         lines.append(
-            f"🏆 Best deal: *{best.provider}* — "
-            f"you'd get *{extra:,.2f} {response.currency_code}* more than the lowest quote."
+            f"✅ *{best.provider}* delivers the most today — "
+            f"*{best.total_received:,.2f} {response.currency_code}* "
+            "for this send amount."
         )
         lines.append(
-            f"_Spread across providers: {spread_rate:,.4f} {response.currency_code}_"
+            f"⚠️ *{worst.provider}* delivers the least today — "
+            f"*{worst.total_received:,.2f} {response.currency_code}* "
+            "for this send amount."
+        )
+
+    lines.append("")
+    lines.append("*What works best for you?*")
+    lines.extend(_quick_pick_bullets(response, ranked_remittance))
+
+    if len(ranked_remittance) >= 2:
+        best = ranked_remittance[0]
+        worst = ranked_remittance[-1]
+        diff = best.total_received - worst.total_received
+        lines.append("")
+        lines.append(
+            f"The difference between the best and worst is "
+            f"*{diff:,.2f} {response.currency_code}* per "
+            f"*{response.amount_usd:,.2f} USD* you send."
         )
 
     ts = response.timestamp
@@ -304,6 +410,18 @@ _COUNTRY_ALIASES: dict[str, tuple[str, str]] = {
     "brasil": ("BRL", "Brazil"),
     "br": ("BRL", "Brazil"),
     "brl": ("BRL", "Brazil"),
+}
+
+# Currency → ISO 3166-1 alpha-2 country code, used to drive the per-corridor
+# Monito scrape. Only currencies present here will get Monito enrichment;
+# other currencies fall back to the rate-table providers only.
+_CURRENCY_TO_ISO2: dict[str, str] = {
+    "MXN": "mx",
+    "COP": "co",
+    "GTQ": "gt",
+    "HNL": "hn",
+    "DOP": "do",
+    "BRL": "br",
 }
 
 
@@ -435,7 +553,18 @@ def format_missing_input_message(has_country: bool, has_amount: bool) -> str:
 
 
 def _chart_title_for(code: str) -> str:
-    return f"USD → {code} • last 7 days (base: open.er-api)"
+    return (
+        f"USD → {code} • last 7 days ({DEFAULT_FX_PROVIDER_DISPLAY_NAME})"
+    )
+
+
+def _chart_attachment_footer(currency_code: str) -> str:
+    """Appended to the quote when a 7-day trend image is sent with the same reply."""
+    return (
+        "\n\n📊 _The graph shows *USD→"
+        f"{currency_code}* over the *last 7 days* "
+        f"(mid-market baseline / {DEFAULT_FX_PROVIDER_DISPLAY_NAME})._"
+    )
 
 
 async def handle_rates_message(phone: str, text: str | None) -> RatesReply:
@@ -474,9 +603,21 @@ async def handle_rates_message(phone: str, text: str | None) -> RatesReply:
                 chart_url = await get_history_chart_url(
                     code, title=_chart_title_for(code)
                 )
+                if chart_url:
+                    body += _chart_attachment_footer(code)
                 return RatesReply(body=body, chart_url=chart_url)
 
-        results = await fetch_all_quotes()
+        # Run rate-table providers (open.er-api) and Monito (per-corridor
+        # multi-provider scrape) in parallel. Each Monito row comes back
+        # as its own FxProviderResult so individual remittance services
+        # (Remitly, Wise, Western Union, …) sit alongside open.er-api in
+        # the side-by-side reply.
+        country_iso2 = _CURRENCY_TO_ISO2.get(code)
+        api_results, monito_results = await asyncio.gather(
+            fetch_all_quotes(),
+            fetch_monito_quotes(country_iso2, amount, code),
+        )
+        results = [*api_results, *monito_results]
         if not results:
             return RatesReply(
                 body=(
@@ -499,6 +640,8 @@ async def handle_rates_message(phone: str, text: str | None) -> RatesReply:
 
         body = format_comparison_response(comparison, from_cache=False)
         chart_url = await get_history_chart_url(code, title=_chart_title_for(code))
+        if chart_url:
+            body += _chart_attachment_footer(code)
         return RatesReply(body=body, chart_url=chart_url)
 
     return RatesReply(
