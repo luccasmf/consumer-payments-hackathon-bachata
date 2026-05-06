@@ -19,6 +19,7 @@ WhatsApp message with the comparison + visual.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -29,7 +30,11 @@ from pydantic import ValidationError
 
 from app.schemas.fx_comparison import FxComparisonResponse, FxProviderQuote
 from app.services.rates_history import get_history_chart_url
-from app.services.rates_providers import FxProviderResult, fetch_all_quotes
+from app.services.rates_providers import (
+    FxProviderResult,
+    fetch_all_quotes,
+    fetch_monito_quotes,
+)
 from app.services.redis_client import RedisStorageClient, get_redis_storage_client
 
 logger = logging.getLogger(__name__)
@@ -131,10 +136,11 @@ def format_comparison_response(
 ) -> str:
     """Render WhatsApp body text from a structured comparison.
 
-    Quotes are sorted *best-first* (highest ``total_received``). Each line
-    names the provider so users can tell sources apart. When multiple quotes
-    exist, the top line gets a *best* marker; the reference feed used for the
-    7-day chart is labeled *chart*.
+    Quotes are sorted *best-first* (highest ``total_received``) and each
+    line shows the provider name next to the amount so users can shop
+    across vendors. The top line gets a small *best* marker when multiple
+    quotes exist; the reference feed used for the 7-day chart is labeled
+    *chart*.
     """
     if not response.quotes:
         return (
@@ -186,7 +192,7 @@ def format_comparison_response(
             extra = response.amount_usd * spread_rate
         lines.append("")
         lines.append(
-            f"🏆 The top quote pays about *{extra:,.2f} {response.currency_code}* "
+            f"🏆 *{best.provider}* pays about *{extra:,.2f} {response.currency_code}* "
             f"more than the lowest — usually small day-to-day noise, not a fee."
         )
 
@@ -301,6 +307,18 @@ _COUNTRY_ALIASES: dict[str, tuple[str, str]] = {
     "brasil": ("BRL", "Brazil"),
     "br": ("BRL", "Brazil"),
     "brl": ("BRL", "Brazil"),
+}
+
+# Currency → ISO 3166-1 alpha-2 country code, used to drive the per-corridor
+# Monito scrape. Only currencies present here will get Monito enrichment;
+# other currencies fall back to the rate-table providers only.
+_CURRENCY_TO_ISO2: dict[str, str] = {
+    "MXN": "mx",
+    "COP": "co",
+    "GTQ": "gt",
+    "HNL": "hn",
+    "DOP": "do",
+    "BRL": "br",
 }
 
 
@@ -473,7 +491,17 @@ async def handle_rates_message(phone: str, text: str | None) -> RatesReply:
                 )
                 return RatesReply(body=body, chart_url=chart_url)
 
-        results = await fetch_all_quotes()
+        # Run rate-table providers (open.er-api) and Monito (per-corridor
+        # multi-provider scrape) in parallel. Each Monito row comes back
+        # as its own FxProviderResult so individual remittance services
+        # (Remitly, Wise, Western Union, …) sit alongside open.er-api in
+        # the side-by-side reply.
+        country_iso2 = _CURRENCY_TO_ISO2.get(code)
+        api_results, monito_results = await asyncio.gather(
+            fetch_all_quotes(),
+            fetch_monito_quotes(country_iso2, amount, code),
+        )
+        results = [*api_results, *monito_results]
         if not results:
             return RatesReply(
                 body=(

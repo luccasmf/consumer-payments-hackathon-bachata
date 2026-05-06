@@ -32,9 +32,12 @@ SAMPLE_RESULTS: list[FxProviderResult] = [
         {"USD": 1.0, "MXN": 17.0512, "COP": 3925.4, "BRL": 5.12},
         is_base=True,
     ),
+    # Representative second provider — shape mirrors what
+    # ``fetch_monito_quotes`` produces (single-currency rates dict, no
+    # is_base). Named after a real Monito row for realism.
     _make_result(
-        "exchangerate-api",
-        {"USD": 1.0, "MXN": 17.1100, "COP": 3920.0, "BRL": 5.15},
+        "Wise",
+        {"MXN": 17.1100, "COP": 3920.0, "BRL": 5.15},
     ),
 ]
 
@@ -80,6 +83,20 @@ def _stub_chart(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rates_service, "get_history_chart_url", fake)
 
 
+@pytest.fixture(autouse=True)
+def _stub_monito(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Default: pretend Monito returned no rows. Real Monito calls drive a
+    Chromium scrape and must never run in tests. Override per-test with
+    :func:`_stub_monito_results` to inject canned rows.
+    """
+
+    async def fake(*_: Any, **__: Any) -> list[FxProviderResult]:
+        return []
+
+    monkeypatch.setattr(rates_service, "fetch_monito_quotes", fake)
+
+
 def _stub_fetch_all(
     monkeypatch: pytest.MonkeyPatch, results: list[FxProviderResult]
 ) -> None:
@@ -87,6 +104,15 @@ def _stub_fetch_all(
         return list(results)
 
     monkeypatch.setattr(rates_service, "fetch_all_quotes", fake)
+
+
+def _stub_monito_results(
+    monkeypatch: pytest.MonkeyPatch, results: list[FxProviderResult]
+) -> None:
+    async def fake(*_: Any, **__: Any) -> list[FxProviderResult]:
+        return list(results)
+
+    monkeypatch.setattr(rates_service, "fetch_monito_quotes", fake)
 
 
 def _stub_chart_url(monkeypatch: pytest.MonkeyPatch, url: str | None) -> None:
@@ -167,7 +193,7 @@ class TestFormatQuoteMessage:
         assert "open.er-api" in message
         assert "exchangerate-api" in message
         assert "Here's what we found" in message
-        assert "top quote pays" in message
+        assert "pays about" in message
         assert "2026-05-06 16:44" in message
 
     def test_highlights_the_best_rate(self) -> None:
@@ -186,9 +212,10 @@ class TestFormatQuoteMessage:
         assert "4,262.80" in provider_lines[1]
         assert "🏆" not in provider_lines[1]
 
-        # Summary line with savings vs. worst quote.
+        # Summary line names the winning provider and the savings vs. worst quote.
         # extra = 250 * (17.1100 - 17.0512) = 14.70
-        assert "top quote pays" in message
+        assert "Wise" in message
+        assert "pays about" in message
         assert "14.70" in message
 
     def test_skips_providers_missing_target_currency(self) -> None:
@@ -202,7 +229,7 @@ class TestFormatQuoteMessage:
         assert "alpha" in message
         assert "beta" not in message
         # With only one quote remaining we shouldn't print multi-quote summary lines.
-        assert "top quote pays" not in message
+        assert "pays about" not in message
         # And there's no badge to award when there's nothing to compare.
         assert "🏆" not in message
 
@@ -229,7 +256,7 @@ class TestFormatQuoteMessage:
         # Flip the rates so the base provider is also the best.
         results = [
             _make_result("open.er-api", {"MXN": 17.5}, is_base=True),
-            _make_result("exchangerate-api", {"MXN": 17.0}),
+            _make_result("Wise", {"MXN": 17.0}),
         ]
         message = rates_service.format_quote_message("Mexico", "MXN", 100.0, results)
         first_line = next(
@@ -266,6 +293,8 @@ class TestHandleRatesMessage:
         )
 
         assert "Mexico" in reply.body
+        assert "open.er-api" in reply.body
+        assert "Wise" in reply.body
         assert "4,262.80" in reply.body
         assert "4,277.50" in reply.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
@@ -381,9 +410,12 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
+        assert "open.er-api" in reply.body
         assert "4,262.80" in reply.body
+        assert "Wise" not in reply.body
         assert "4,277.50" not in reply.body
-        assert "top quote pays" not in reply.body
+        # No comparison summary when only one provider responds.
+        assert "pays about" not in reply.body
 
     def test_handles_unsupported_currency_gracefully(
         self, monkeypatch: pytest.MonkeyPatch
@@ -426,6 +458,67 @@ class TestHandleRatesMessage:
         assert reply.chart_url is None
         assert "Mexico" in reply.body
         assert "you're sending" in reply.body
+
+    def test_merges_monito_rows_as_distinct_providers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Monito results are stitched in alongside the API providers.
+
+        Each Monito row (Remitly, Wise, Western Union, …) becomes its own
+        line in the reply with its own rate.
+        """
+        _stub_fetch_all(monkeypatch, [SAMPLE_RESULTS[0]])  # only open.er-api
+        _stub_monito_results(
+            monkeypatch,
+            [
+                _make_result("Remitly", {"MXN": 17.20}),
+                _make_result("Wise", {"MXN": 17.15}),
+                _make_result("Western Union", {"MXN": 16.90}),
+            ],
+        )
+        rates_service._mark_pending(self.PHONE)
+
+        reply = asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Mexico 250")
+        )
+
+        # All sources appear as distinct providers in the body.
+        assert "open.er-api" in reply.body
+        assert "Remitly" in reply.body
+        assert "Wise" in reply.body
+        assert "Western Union" in reply.body
+
+        provider_lines = [
+            line for line in reply.body.splitlines() if line.startswith("• ")
+        ]
+        assert len(provider_lines) == 4
+        # Highest MXN-per-USD wins the BEST badge → Remitly at 17.20.
+        assert "Remitly" in provider_lines[0]
+        assert "best" in provider_lines[0]
+        # Base flag still attaches to open.er-api regardless of ranking.
+        base_line = next(line for line in provider_lines if "open.er-api" in line)
+        assert "chart" in base_line
+
+    def test_monito_passes_country_iso2_and_amount(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The service maps currency code → ISO2 country before scraping."""
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
+
+        captured: list[tuple[Any, ...]] = []
+
+        async def fake_monito(*args: Any, **kwargs: Any) -> list[FxProviderResult]:
+            captured.append(args)
+            return []
+
+        monkeypatch.setattr(rates_service, "fetch_monito_quotes", fake_monito)
+        rates_service._mark_pending(self.PHONE)
+
+        asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Brazil 100")
+        )
+
+        assert captured == [("br", 100.0, "BRL")]
 
 
 # Smoke test that an old import path doesn't accidentally come back.
