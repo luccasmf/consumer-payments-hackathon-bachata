@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 FX_QUOTE_CACHE_TTL_SECONDS = 300
 
+# Canonical spot / chart anchor (see ``OpenErApiProvider``). Shown as "Default FX rate";
+# all other providers are grouped as remittance-style quotes for comparison.
+DEFAULT_FX_PROVIDER_NAME = "open.er-api"
+
 
 @dataclass(frozen=True)
 class RatesReply:
@@ -91,8 +95,8 @@ def build_fx_comparison_from_providers(
 ) -> FxComparisonResponse | None:
     """Build a structured comparison from raw provider results (ordered like ``results``).
 
-    Carries ``is_base`` through onto each :class:`FxProviderQuote` so the
-    formatter can highlight the base / reference provider in the reply.
+    Carries ``is_base`` through onto each :class:`FxProviderQuote`. Best quote /
+    spread metrics apply to **remittance** providers only (excluding open.er-api).
     """
     quotes: list[FxProviderQuote] = []
     ts = timestamp or datetime.now(UTC)
@@ -110,23 +114,44 @@ def build_fx_comparison_from_providers(
         )
     if not quotes:
         return None
-    best = max(quotes, key=lambda q: q.total_received)
+
+    remittance = [q for q in quotes if q.provider != DEFAULT_FX_PROVIDER_NAME]
+    best_remittance = (
+        max(remittance, key=lambda q: q.total_received) if remittance else None
+    )
     spread_rate: float | None = None
     advantage: float | None = None
-    if len(quotes) > 1:
-        rates_only = [q.rate_per_usd for q in quotes]
+    if len(remittance) > 1:
+        rates_only = [q.rate_per_usd for q in remittance]
         spread_rate = max(rates_only) - min(rates_only)
         advantage = amount_usd * spread_rate
+
     return FxComparisonResponse(
         destination_country=destination_country,
         currency_code=currency_code,
         amount_usd=amount_usd,
         quotes=quotes,
-        best_provider=best.provider,
+        best_provider=best_remittance.provider if best_remittance else None,
         spread_rate=spread_rate,
         advantage_vs_worst=advantage,
         timestamp=ts,
     )
+
+
+def _split_default_and_remittance(
+    quotes: list[FxProviderQuote],
+) -> tuple[FxProviderQuote | None, list[FxProviderQuote]]:
+    """Isolate open.er-api (default spot) from remittance-style providers."""
+    default_q = next(
+        (q for q in quotes if q.provider == DEFAULT_FX_PROVIDER_NAME),
+        None,
+    )
+    remittance = sorted(
+        [q for q in quotes if q.provider != DEFAULT_FX_PROVIDER_NAME],
+        key=lambda q: q.total_received,
+        reverse=True,
+    )
+    return default_q, remittance
 
 
 def format_comparison_response(
@@ -136,11 +161,10 @@ def format_comparison_response(
 ) -> str:
     """Render WhatsApp body text from a structured comparison.
 
-    Quotes are sorted *best-first* (highest ``total_received``) and each
-    line shows the provider name next to the amount so users can shop
-    across vendors. The top line gets a small *best* marker when multiple
-    quotes exist; the reference feed used for the 7-day chart is labeled
-    *chart*.
+    ``open.er-api`` is shown under *Default FX rate* (chart anchor). All other
+    providers appear under *Remittance provider rates*, sorted best→worst by
+    amount received. The single best remittance quote is called out on the line
+    immediately below that list.
     """
     if not response.quotes:
         return (
@@ -148,52 +172,67 @@ def format_comparison_response(
             f"({response.currency_code}) from any provider right now. Try again in a moment."
         )
 
-    sorted_quotes = sorted(
-        response.quotes, key=lambda q: q.total_received, reverse=True
-    )
-    has_comparison = len(sorted_quotes) > 1
-    best = sorted_quotes[0]
+    default_q, remittance_sorted = _split_default_and_remittance(response.quotes)
+    top_remittance = remittance_sorted[0] if remittance_sorted else None
+    has_remittance_spread = len(remittance_sorted) > 1
 
-    subhead = (
-        "*Here's what we found (best first):*"
-        if has_comparison
-        else "*Estimated arrival:*"
-    )
     lines = [
         f"💱 *{response.destination_country}* · you're sending *{response.amount_usd:,.2f} USD*",
         "",
-        subhead,
     ]
-    for index, quote in enumerate(sorted_quotes):
+
+    if default_q:
         tags: list[str] = []
-        if has_comparison and index == 0:
-            tags.append("🏆 *best*")
-        if quote.is_base:
+        if default_q.is_base or default_q.provider == DEFAULT_FX_PROVIDER_NAME:
             tags.append("📍 *chart*")
         suffix = (" · " + " · ".join(tags)) if tags else ""
+        lines.append("*Default FX rate*")
         lines.append(
-            f"• *{quote.provider}* · *{quote.total_received:,.2f} "
+            f"• *{default_q.provider}* · *{default_q.total_received:,.2f} "
             f"{response.currency_code}*{suffix}"
+        )
+        lines.append("")
+
+    if remittance_sorted:
+        lines.append("*Remittance provider rates (best → worst)*")
+        for quote in remittance_sorted:
+            lines.append(
+                f"• *{quote.provider}* · *{quote.total_received:,.2f} "
+                f"{response.currency_code}*"
+            )
+        lines.append("")
+        lines.append(
+            f"🏆 *Best FX:* *{top_remittance.provider}* — "
+            f"*{top_remittance.total_received:,.2f} {response.currency_code}* "
+            "for this send amount."
         )
 
     lines.append("")
+    rate_for_blurb = (
+        top_remittance.rate_per_usd
+        if top_remittance
+        else (default_q.rate_per_usd if default_q else response.quotes[0].rate_per_usd)
+    )
+    blurb_scope = "best remittance quote" if top_remittance else "spot reference"
     lines.append(
-        f"_About *{best.rate_per_usd:,.2f} {response.currency_code}* per US dollar "
-        f"(best quote)._"
+        f"_About *{rate_for_blurb:,.2f} {response.currency_code}* per US dollar "
+        f"({blurb_scope})._"
     )
 
-    if has_comparison:
+    if has_remittance_spread:
         spread_rate = response.spread_rate
         if spread_rate is None:
-            worst = sorted_quotes[-1]
-            spread_rate = best.rate_per_usd - worst.rate_per_usd
+            best_r = max(remittance_sorted, key=lambda q: q.total_received)
+            worst_r = min(remittance_sorted, key=lambda q: q.total_received)
+            spread_rate = best_r.rate_per_usd - worst_r.rate_per_usd
         extra = response.advantage_vs_worst
         if extra is None:
-            extra = response.amount_usd * spread_rate
+            extra = response.amount_usd * (spread_rate or 0.0)
         lines.append("")
         lines.append(
             f"🏆 *{best.provider}* pays about *{extra:,.2f} {response.currency_code}* "
-            f"more than the lowest — usually small day-to-day noise, not a fee."
+            f"more than the lowest remittance quote — usually small day-to-day noise, "
+            "not a fee."
         )
 
     ts = response.timestamp

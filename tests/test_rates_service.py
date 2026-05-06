@@ -41,6 +41,13 @@ SAMPLE_RESULTS: list[FxProviderResult] = [
     ),
 ]
 
+# Default + two remittance feeds so spread copy exercises the multi-remittance path.
+THREE_REMITTANCE_RESULTS: list[FxProviderResult] = [
+    SAMPLE_RESULTS[0],
+    SAMPLE_RESULTS[1],
+    _make_result("low-tier-api", {"USD": 1.0, "MXN": 17.0000, "COP": 3900.0}),
+]
+
 
 @pytest.fixture(autouse=True)
 def _reset_pending_state() -> None:
@@ -192,9 +199,30 @@ class TestFormatQuoteMessage:
         assert "4,277.50" in message
         assert "open.er-api" in message
         assert "exchangerate-api" in message
-        assert "Here's what we found" in message
-        assert "pays about" in message
+        assert "Default FX rate" in message
+        assert "Remittance provider rates" in message
+        assert "Best FX:" in message
         assert "2026-05-06 16:44" in message
+
+    @pytest.mark.parametrize(
+        "results, expect_spread_line",
+        [
+            (SAMPLE_RESULTS, False),
+            (THREE_REMITTANCE_RESULTS, True),
+        ],
+    )
+    def test_spread_line_only_with_multiple_remittance_feeds(
+        self,
+        results: list[FxProviderResult],
+        expect_spread_line: bool,
+    ) -> None:
+        message = rates_service.format_quote_message("Mexico", "MXN", 250.0, results)
+        if expect_spread_line:
+            assert "top remittance quote pays" in message
+            # 250 * (17.11 - 17.00) = 27.50 MXN between best and worst remittance.
+            assert "27.50" in message
+        else:
+            assert "top remittance quote pays" not in message
 
     def test_highlights_the_best_rate(self) -> None:
         message = rates_service.format_quote_message(
@@ -203,20 +231,21 @@ class TestFormatQuoteMessage:
         lines = message.splitlines()
 
         provider_lines = [line for line in lines if line.startswith("• ")]
-        # 17.11 > 17.0512 → higher MXN total should be first with the badge.
-        assert "exchangerate-api" in provider_lines[0]
-        assert "4,277.50" in provider_lines[0]
-        assert "🏆" in provider_lines[0]
-        assert "best" in provider_lines[0]
-        assert "open.er-api" in provider_lines[1]
-        assert "4,262.80" in provider_lines[1]
-        assert "🏆" not in provider_lines[1]
+        # Default spot block first; remittance list sorted best → worst (by total MXN).
+        assert "open.er-api" in provider_lines[0]
+        assert "4,262.80" in provider_lines[0]
+        assert "exchangerate-api" in provider_lines[1]
+        assert "4,277.50" in provider_lines[1]
+        assert not any("🏆" in line for line in provider_lines)
 
         # Summary line names the winning provider and the savings vs. worst quote.
         # extra = 250 * (17.1100 - 17.0512) = 14.70
         assert "Wise" in message
         assert "pays about" in message
         assert "14.70" in message
+        idx = lines.index("*Remittance provider rates (best → worst)*")
+        assert lines[idx + 3].startswith("🏆 *Best FX:*")
+        assert "exchangerate-api" in lines[idx + 3]
 
     def test_skips_providers_missing_target_currency(self) -> None:
         partial = [
@@ -228,10 +257,9 @@ class TestFormatQuoteMessage:
         assert "1,700.00" in message
         assert "alpha" in message
         assert "beta" not in message
-        # With only one quote remaining we shouldn't print multi-quote summary lines.
-        assert "pays about" not in message
-        # And there's no badge to award when there's nothing to compare.
-        assert "🏆" not in message
+        # One remittance quote → spread paragraph omitted; Best FX line still names the winner.
+        assert "top remittance quote pays" not in message
+        assert "🏆 *Best FX:* *alpha*" in message
 
     def test_returns_friendly_message_when_no_provider_has_currency(self) -> None:
         none_match = [_make_result("alpha", {"BRL": 5.0})]
@@ -245,26 +273,32 @@ class TestFormatQuoteMessage:
         )
         provider_lines = [line for line in message.splitlines() if line.startswith("• ")]
 
-        # open.er-api is our base → lower amount line carries the chart tag.
+        # open.er-api is default spot → chart tag stays on that bullet only.
         base_line = next(line for line in provider_lines if "4,262.80" in line)
         secondary_line = next(line for line in provider_lines if "4,277.50" in line)
         assert "📍" in base_line
         assert "chart" in base_line
         assert "📍" not in secondary_line
 
-    def test_base_and_best_can_coexist_on_same_line(self) -> None:
-        # Flip the rates so the base provider is also the best.
+    def test_default_spot_can_outrank_remittance_but_best_callout_is_remittance_only(
+        self,
+    ) -> None:
+        # Stronger spot rate than the secondary remittance feed.
         results = [
             _make_result("open.er-api", {"MXN": 17.5}, is_base=True),
             _make_result("Wise", {"MXN": 17.0}),
         ]
         message = rates_service.format_quote_message("Mexico", "MXN", 100.0, results)
-        first_line = next(
-            line for line in message.splitlines() if line.startswith("• ")
+        default_line = next(
+            line for line in message.splitlines()
+            if line.startswith("• ") and "open.er-api" in line
         )
-        assert "1,750.00" in first_line
-        assert "best" in first_line
-        assert "chart" in first_line
+        assert "1,750.00" in default_line
+        assert "chart" in default_line
+
+        best_line = next(line for line in message.splitlines() if line.startswith("🏆 *Best FX:"))
+        assert "exchangerate-api" in best_line
+        assert "1,700.00" in best_line
 
 
 class TestHandleRatesMessage:
@@ -415,7 +449,7 @@ class TestHandleRatesMessage:
         assert "Wise" not in reply.body
         assert "4,277.50" not in reply.body
         # No comparison summary when only one provider responds.
-        assert "pays about" not in reply.body
+        assert "top remittance quote pays" not in reply.body
 
     def test_handles_unsupported_currency_gracefully(
         self, monkeypatch: pytest.MonkeyPatch
