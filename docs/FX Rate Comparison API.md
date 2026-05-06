@@ -13,7 +13,7 @@ generated_by: cursor-agent
 
 # FX Rate Comparison API
 
-Hackathon product note: an **API that compares FX rates / all-in costs** across remittance providers using public data (websites and, where relevant, Google search as part of discovery — not as the single source of truth).
+Hackathon product note: an **API that compares FX rates** across remittance providers using public data (websites and, where relevant, Google search as part of discovery — not as the single source of truth).
 
 **Relationship to this repo:** the backend remains FastAPI + WhatsApp via Kapso; this API can power replies from the bot in `app/bot.py`. See also [`AGENTS.md`](../AGENTS.md).
 
