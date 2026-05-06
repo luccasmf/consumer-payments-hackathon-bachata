@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -38,6 +41,18 @@ def _reset_pending_state() -> None:
     rates_service._pending_rates.clear()
     yield
     rates_service._pending_rates.clear()
+
+
+@pytest.fixture(autouse=True)
+def _disable_redis_cache(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Avoid real Redis from `.env` except in :class:`TestFxRedisCache` (explicit mocks)."""
+    if request.node.get_closest_marker("redis_cache") or "TestFxRedisCache" in request.node.nodeid:
+        return
+    monkeypatch.setattr(
+        rates_service,
+        "get_redis_storage_client",
+        lambda *_a, **_k: None,
+    )
 
 
 def _stub_fetch_all(
@@ -105,9 +120,12 @@ class TestParseCountryAndAmount:
 
 class TestFormatQuoteMessage:
     def test_renders_one_line_per_provider(self) -> None:
-        message = rates_service.format_quote_message(
-            "Mexico", "MXN", 250.0, SAMPLE_RESULTS
+        fixed = datetime(2026, 5, 6, 16, 44, tzinfo=UTC)
+        comparison = rates_service.build_fx_comparison_from_providers(
+            "Mexico", "MXN", 250.0, SAMPLE_RESULTS, timestamp=fixed
         )
+        assert comparison is not None
+        message = rates_service.format_comparison_response(comparison)
 
         assert "Quote — Mexico" in message
         assert "250.00 USD" in message
@@ -119,6 +137,7 @@ class TestFormatQuoteMessage:
         assert "4,277.50" in message
         # Spread shown when 2+ providers present.
         assert "Spread" in message
+        assert "2026-05-06 16:44" in message
 
     def test_highlights_the_best_rate(self) -> None:
         message = rates_service.format_quote_message(
@@ -327,6 +346,84 @@ class TestHandleRatesMessage:
 def test_old_fetch_usd_rates_is_gone() -> None:
     assert not hasattr(rates_service, "fetch_usd_rates")
     assert not hasattr(rates_service, "RATES_URL")
+
+
+@pytest.mark.redis_cache
+class TestFxRedisCache:
+    """Explicit Redis mocks — autouse does not stub ``get_redis_storage_client`` here."""
+
+    PHONE = "+15559998888"
+
+    def test_cache_hit_skips_provider_fetch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[int] = []
+
+        async def counting_fetch(*_: Any, **__: Any) -> list[FxProviderResult]:
+            calls.append(1)
+            return SAMPLE_RESULTS
+
+        monkeypatch.setattr(rates_service, "fetch_all_quotes", counting_fetch)
+
+        cached_model = rates_service.build_fx_comparison_from_providers(
+            "Mexico", "MXN", 250.0, SAMPLE_RESULTS, timestamp=datetime.now(UTC)
+        )
+        assert cached_model is not None
+        payload = json.dumps(cached_model.model_dump(mode="json"))
+
+        mock_redis = MagicMock()
+        mock_redis.get = AsyncMock(return_value=payload)
+        mock_redis.delete = AsyncMock(return_value=1)
+        mock_redis.save = AsyncMock(return_value=None)
+
+        monkeypatch.setattr(
+            rates_service,
+            "get_redis_storage_client",
+            lambda *_a, **_k: mock_redis,
+        )
+
+        reply = asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Mexico 250")
+        )
+
+        assert calls == []
+        assert "(cached)" in reply
+        mock_redis.save.assert_not_called()
+
+    def test_stale_cache_deleted_and_refetches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[int] = []
+
+        async def counting_fetch(*_: Any, **__: Any) -> list[FxProviderResult]:
+            calls.append(1)
+            return SAMPLE_RESULTS
+
+        monkeypatch.setattr(rates_service, "fetch_all_quotes", counting_fetch)
+
+        old_ts = datetime.now(UTC) - timedelta(minutes=10)
+        stale = rates_service.build_fx_comparison_from_providers(
+            "Mexico", "MXN", 250.0, SAMPLE_RESULTS, timestamp=old_ts
+        )
+        assert stale is not None
+        payload = json.dumps(stale.model_dump(mode="json"))
+
+        mock_redis = MagicMock()
+        mock_redis.get = AsyncMock(return_value=payload)
+        mock_redis.delete = AsyncMock(return_value=1)
+        mock_redis.save = AsyncMock(return_value=None)
+
+        monkeypatch.setattr(
+            rates_service,
+            "get_redis_storage_client",
+            lambda *_a, **_k: mock_redis,
+        )
+
+        asyncio.run(rates_service.handle_rates_message(self.PHONE, "Mexico 250"))
+
+        assert calls == [1]
+        mock_redis.delete.assert_awaited()
+        mock_redis.save.assert_awaited()
 
 
 # Provider import is wired through the service via fetch_all_quotes.

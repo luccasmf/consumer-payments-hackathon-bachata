@@ -9,15 +9,172 @@ Two-turn conversation:
    can compare quotes side by side.
 
 Provider implementations live in :mod:`app.services.rates_providers`.
+
+Quotes for the same (currency, USD amount) are cached in Redis for five minutes
+when Redis is configured; the structured payload includes a UTC timestamp for
+freshness.
 """
 
+from __future__ import annotations
+
+import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
+from pydantic import ValidationError
+
+from app.schemas.fx_comparison import FxComparisonResponse, FxProviderQuote
 from app.services.rates_providers import FxProviderResult, fetch_all_quotes
+from app.services.redis_client import RedisStorageClient, get_redis_storage_client
 
 logger = logging.getLogger(__name__)
+
+FX_QUOTE_CACHE_TTL_SECONDS = 300
+
+
+def _comparison_cache_key(currency_code: str, amount_usd: float) -> str:
+    normalized = f"{round(amount_usd, 2):.2f}"
+    return f"fx:comparison:{currency_code}:{normalized}"
+
+
+def _comparison_is_fresh(
+    timestamp: datetime,
+    *,
+    max_age_seconds: int = FX_QUOTE_CACHE_TTL_SECONDS,
+) -> bool:
+    now = datetime.now(UTC)
+    ts = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=UTC)
+    return (now - ts) < timedelta(seconds=max_age_seconds)
+
+
+def build_fx_comparison_from_providers(
+    destination_country: str,
+    currency_code: str,
+    amount_usd: float,
+    results: list[FxProviderResult],
+    *,
+    timestamp: datetime | None = None,
+) -> FxComparisonResponse | None:
+    """Build a structured comparison from raw provider results (ordered like ``results``)."""
+    quotes: list[FxProviderQuote] = []
+    ts = timestamp or datetime.now(UTC)
+    for result in results:
+        if currency_code not in result.rates:
+            continue
+        rate = result.rates[currency_code]
+        quotes.append(
+            FxProviderQuote(
+                provider=result.provider,
+                total_received=amount_usd * rate,
+                rate_per_usd=rate,
+            )
+        )
+    if not quotes:
+        return None
+    best = max(quotes, key=lambda q: q.total_received)
+    spread_rate: float | None = None
+    advantage: float | None = None
+    if len(quotes) > 1:
+        rates_only = [q.rate_per_usd for q in quotes]
+        spread_rate = max(rates_only) - min(rates_only)
+        advantage = amount_usd * spread_rate
+    return FxComparisonResponse(
+        destination_country=destination_country,
+        currency_code=currency_code,
+        amount_usd=amount_usd,
+        quotes=quotes,
+        best_provider=best.provider,
+        spread_rate=spread_rate,
+        advantage_vs_worst=advantage,
+        timestamp=ts,
+    )
+
+
+def format_comparison_response(
+    response: FxComparisonResponse,
+    *,
+    from_cache: bool = False,
+) -> str:
+    """Render WhatsApp body text from a structured comparison."""
+    if not response.quotes:
+        return (
+            f"I couldn't find a live rate for {response.destination_country} "
+            f"({response.currency_code}) from any provider right now. Try again in a moment."
+        )
+
+    lines = [
+        f"💱 *Quote — {response.destination_country}*",
+        f"Sending {response.amount_usd:,.2f} USD",
+        "",
+        "*Provider quotations:*",
+    ]
+    best_name = response.best_provider
+    for q in response.quotes:
+        prefix = "⭐ " if best_name and q.provider == best_name else ""
+        lines.append(
+            f"• {prefix}*{q.provider}*: {q.total_received:,.2f} {response.currency_code} "
+            f"_(1 USD = {q.rate_per_usd:,.4f})_"
+        )
+
+    if response.spread_rate is not None and len(response.quotes) > 1:
+        lines.append("")
+        lines.append(
+            f"_Spread across providers: {response.spread_rate:,.4f} {response.currency_code}_"
+        )
+    if response.advantage_vs_worst is not None and len(response.quotes) > 1:
+        lines.append(
+            f"_Extra vs lowest quote: {response.advantage_vs_worst:,.2f} "
+            f"{response.currency_code}_"
+        )
+
+    ts = response.timestamp
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    cache_note = " (cached)" if from_cache else ""
+    lines.append("")
+    lines.append(f"_Updated {ts.strftime('%Y-%m-%d %H:%M')} UTC{cache_note}_")
+
+    return "\n".join(lines)
+
+
+async def _try_load_cached_comparison(
+    redis: RedisStorageClient,
+    currency_code: str,
+    amount_usd: float,
+) -> FxComparisonResponse | None:
+    key = _comparison_cache_key(currency_code, amount_usd)
+    raw = await redis.get(key)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        model = FxComparisonResponse.model_validate(data)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        logger.debug("Invalid FX cache entry for %s: %s", key, exc)
+        await redis.delete(key)
+        return None
+    if not _comparison_is_fresh(model.timestamp):
+        await redis.delete(key)
+        return None
+    return model
+
+
+async def _save_comparison_cache(
+    redis: RedisStorageClient,
+    currency_code: str,
+    amount_usd: float,
+    response: FxComparisonResponse,
+) -> None:
+    key = _comparison_cache_key(currency_code, amount_usd)
+    await redis.delete(key)
+    await redis.save(
+        key,
+        response.model_dump(mode="json"),
+        ttl_seconds=FX_QUOTE_CACHE_TTL_SECONDS,
+    )
+
 
 # Currencies surfaced as featured corridors. Order matters for the prompt.
 # (code, display_name, flag)
@@ -186,53 +343,15 @@ def format_quote_message(
     summary line showing how much extra the user pockets vs. the worst
     quote.
     """
-    quotes: list[tuple[FxProviderResult, float]] = [
-        (r, r.rates[code]) for r in results if code in r.rates
-    ]
-
-    if not quotes:
+    comparison = build_fx_comparison_from_providers(country, code, amount, results)
+    if comparison is None:
         return (
             f"I couldn't find a live rate for {country} ({code}) from any "
             "provider right now. Try again in a moment."
         )
+    return format_comparison_response(comparison, from_cache=False)
 
-    # Best rate = most local currency per USD for the sender.
-    quotes.sort(key=lambda item: item[1], reverse=True)
-    has_comparison = len(quotes) > 1
-    best_result, best_rate = quotes[0]
 
-    header = (
-        "*Provider quotations* (best first):"
-        if has_comparison
-        else "*Provider quotation:*"
-    )
-    lines = [
-        f"💱 *Quote — {country}*",
-        f"Sending {amount:,.2f} USD",
-        "",
-        header,
-    ]
-    for index, (result, rate) in enumerate(quotes):
-        converted = amount * rate
-        # Only award the badge when there's something to compare against.
-        badge = " 🏆 *BEST*" if has_comparison and index == 0 else ""
-        lines.append(
-            f"• *{result.provider}*: {converted:,.2f} {code} "
-            f"_(1 USD = {rate:,.4f})_{badge}"
-        )
-
-    if has_comparison:
-        _, worst_rate = quotes[-1]
-        extra = amount * (best_rate - worst_rate)
-        spread = best_rate - worst_rate
-        lines.append("")
-        lines.append(
-            f"🏆 Best deal: *{best_result.provider}* — "
-            f"you'd get *{extra:,.2f} {code}* more than the lowest quote."
-        )
-        lines.append(f"_Spread across providers: {spread:,.4f} {code}_")
-
-    return "\n".join(lines)
 
 
 def format_missing_input_message(has_country: bool, has_amount: bool) -> str:
@@ -271,14 +390,28 @@ async def handle_rates_message(phone: str, text: str | None) -> str:
     if pending.country and pending.amount is not None:
         country, amount = pending.country, pending.amount
         _clear_pending(phone)
+        code, display = country
+        redis = get_redis_storage_client()
+        if redis is not None:
+            cached = await _try_load_cached_comparison(redis, code, amount)
+            if cached is not None:
+                return format_comparison_response(cached, from_cache=True)
+
         results = await fetch_all_quotes()
         if not results:
             return (
                 "Sorry — I couldn't reach any FX provider right now. "
                 "Please try again in a moment."
             )
-        code, display = country
-        return format_quote_message(display, code, amount, results)
+        comparison = build_fx_comparison_from_providers(display, code, amount, results)
+        if comparison is None:
+            return (
+                f"I couldn't find a live rate for {display} ({code}) from any "
+                "provider right now. Try again in a moment."
+            )
+        if redis is not None:
+            await _save_comparison_cache(redis, code, amount, comparison)
+        return format_comparison_response(comparison, from_cache=False)
 
     return format_missing_input_message(
         has_country=pending.country is not None,
