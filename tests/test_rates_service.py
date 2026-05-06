@@ -198,7 +198,7 @@ class TestFormatQuoteMessage:
         assert "4,262.80" in message
         assert "4,277.50" in message
         assert "open.er-api" in message
-        assert "exchangerate-api" in message
+        assert "Wise" in message
         assert "Default FX rate" in message
         assert "Remittance provider rates" in message
         assert "Best FX:" in message
@@ -218,11 +218,11 @@ class TestFormatQuoteMessage:
     ) -> None:
         message = rates_service.format_quote_message("Mexico", "MXN", 250.0, results)
         if expect_spread_line:
-            assert "top remittance quote pays" in message
+            assert "more than the lowest remittance quote" in message
             # 250 * (17.11 - 17.00) = 27.50 MXN between best and worst remittance.
             assert "27.50" in message
         else:
-            assert "top remittance quote pays" not in message
+            assert "more than the lowest remittance quote" not in message
 
     def test_highlights_the_best_rate(self) -> None:
         message = rates_service.format_quote_message(
@@ -234,18 +234,19 @@ class TestFormatQuoteMessage:
         # Default spot block first; remittance list sorted best → worst (by total MXN).
         assert "open.er-api" in provider_lines[0]
         assert "4,262.80" in provider_lines[0]
-        assert "exchangerate-api" in provider_lines[1]
+        assert "Wise" in provider_lines[1]
         assert "4,277.50" in provider_lines[1]
+        # The 🏆 callout sits on its own line, not on a bullet.
         assert not any("🏆" in line for line in provider_lines)
 
-        # Summary line names the winning provider and the savings vs. worst quote.
-        # extra = 250 * (17.1100 - 17.0512) = 14.70
+        # SAMPLE_RESULTS has only one remittance feed → no spread copy,
+        # but the Best FX callout still names the winner.
         assert "Wise" in message
-        assert "pays about" in message
-        assert "14.70" in message
+        assert "more than the lowest remittance quote" not in message
         idx = lines.index("*Remittance provider rates (best → worst)*")
+        # blank line, then "🏆 *Best FX:* ..." after the single remittance bullet.
         assert lines[idx + 3].startswith("🏆 *Best FX:*")
-        assert "exchangerate-api" in lines[idx + 3]
+        assert "Wise" in lines[idx + 3]
 
     def test_skips_providers_missing_target_currency(self) -> None:
         partial = [
@@ -258,7 +259,7 @@ class TestFormatQuoteMessage:
         assert "alpha" in message
         assert "beta" not in message
         # One remittance quote → spread paragraph omitted; Best FX line still names the winner.
-        assert "top remittance quote pays" not in message
+        assert "more than the lowest remittance quote" not in message
         assert "🏆 *Best FX:* *alpha*" in message
 
     def test_returns_friendly_message_when_no_provider_has_currency(self) -> None:
@@ -297,7 +298,7 @@ class TestFormatQuoteMessage:
         assert "chart" in default_line
 
         best_line = next(line for line in message.splitlines() if line.startswith("🏆 *Best FX:"))
-        assert "exchangerate-api" in best_line
+        assert "Wise" in best_line
         assert "1,700.00" in best_line
 
 
@@ -525,13 +526,25 @@ class TestHandleRatesMessage:
         provider_lines = [
             line for line in reply.body.splitlines() if line.startswith("• ")
         ]
+        # 1 default (open.er-api) + 3 remittance rows from Monito.
         assert len(provider_lines) == 4
-        # Highest MXN-per-USD wins the BEST badge → Remitly at 17.20.
-        assert "Remitly" in provider_lines[0]
-        assert "best" in provider_lines[0]
-        # Base flag still attaches to open.er-api regardless of ranking.
+        # The Best FX callout (its own line, not a bullet) names the top
+        # remittance row by USD-yield → Remitly at 17.20.
+        best_line = next(
+            line for line in reply.body.splitlines()
+            if line.startswith("🏆 *Best FX:")
+        )
+        assert "Remitly" in best_line
+        # The default bullet sits in its own block above the remittance list.
         base_line = next(line for line in provider_lines if "open.er-api" in line)
         assert "chart" in base_line
+        # Remittance bullets follow the default bullet, sorted best → worst.
+        remittance_lines = [
+            line for line in provider_lines if "open.er-api" not in line
+        ]
+        assert "Remitly" in remittance_lines[0]
+        assert "Wise" in remittance_lines[1]
+        assert "Western Union" in remittance_lines[2]
 
     def test_monito_passes_country_iso2_and_amount(
         self, monkeypatch: pytest.MonkeyPatch

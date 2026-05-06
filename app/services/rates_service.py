@@ -230,7 +230,7 @@ def format_comparison_response(
             extra = response.amount_usd * (spread_rate or 0.0)
         lines.append("")
         lines.append(
-            f"🏆 *{best.provider}* pays about *{extra:,.2f} {response.currency_code}* "
+            f"🏆 *{top_remittance.provider}* pays about *{extra:,.2f} {response.currency_code}* "
             f"more than the lowest remittance quote — usually small day-to-day noise, "
             "not a fee."
         )
