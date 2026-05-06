@@ -1,24 +1,22 @@
 """
-FX rates lookup for remittance flows.
+FX rates conversation flow.
 
 Two-turn conversation:
 
 1. User asks for rates → bot prompts for *country* and *amount*.
 2. User replies with both (or sends them in the original message) →
-   bot returns a conversion using the live USD-base rate.
+   bot returns conversions from every available FX provider so the user
+   can compare quotes side by side.
 
-Rates come from the free, key-less ``open.er-api.com`` endpoint.
+Provider implementations live in :mod:`app.services.rates_providers`.
 """
 
 import logging
 import re
-from typing import Any
 
-import httpx
+from app.services.rates_providers import FxProviderResult, fetch_all_quotes
 
 logger = logging.getLogger(__name__)
-
-RATES_URL = "https://open.er-api.com/v6/latest/USD"
 
 # Currencies surfaced as featured corridors. Order matters for the prompt.
 # (code, display_name, flag)
@@ -148,32 +146,6 @@ def parse_country_and_amount(
     return country, amount
 
 
-async def fetch_usd_rates(client: httpx.AsyncClient | None = None) -> dict[str, float]:
-    """
-    Fetch latest USD-base rates. Returns a mapping like ``{"MXN": 17.05, ...}``.
-
-    Raises ``httpx.HTTPError`` on network/HTTP failure or ``ValueError`` if the
-    upstream payload is malformed.
-    """
-    owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=10.0)
-    try:
-        response = await client.get(RATES_URL)
-        response.raise_for_status()
-        data: dict[str, Any] = response.json()
-    finally:
-        if owns_client:
-            await client.aclose()
-
-    if data.get("result") != "success" or "rates" not in data:
-        raise ValueError(f"Unexpected rates payload: {data!r}")
-
-    rates = data["rates"]
-    if not isinstance(rates, dict):
-        raise ValueError("rates payload is not a dict")
-    return {code: float(value) for code, value in rates.items()}
-
-
 def get_rates_prompt() -> str:
     """Reply asking the user for the destination country and the USD amount."""
     countries = ", ".join(country for _, country, _ in _FEATURED_CORRIDORS[:4])
@@ -185,19 +157,50 @@ def get_rates_prompt() -> str:
     )
 
 
-def format_quote_message(country: str, code: str, amount: float, rate: float) -> str:
-    """Render a single-corridor conversion reply."""
-    converted = amount * rate
-    return (
-        f"💱 *Quote — {country}*\n"
-        f"{amount:,.2f} USD ≈ {converted:,.2f} {code}\n"
-        f"_Rate: 1 USD = {rate:,.4f} {code}_"
-    )
-
-
-def format_missing_input_message(
-    has_country: bool, has_amount: bool, original_text: str | None = None
+def format_quote_message(
+    country: str,
+    code: str,
+    amount: float,
+    results: list[FxProviderResult],
 ) -> str:
+    """Render a multi-provider conversion reply.
+
+    Lists each provider that returned a rate for ``code`` so the user can
+    compare quotations side by side.
+    """
+    quotes: list[tuple[FxProviderResult, float]] = [
+        (r, r.rates[code]) for r in results if code in r.rates
+    ]
+
+    if not quotes:
+        return (
+            f"I couldn't find a live rate for {country} ({code}) from any "
+            "provider right now. Try again in a moment."
+        )
+
+    lines = [
+        f"💱 *Quote — {country}*",
+        f"Sending {amount:,.2f} USD",
+        "",
+        "*Provider quotations:*",
+    ]
+    for result, rate in quotes:
+        converted = amount * rate
+        lines.append(
+            f"• *{result.provider}*: {converted:,.2f} {code} "
+            f"_(1 USD = {rate:,.4f})_"
+        )
+
+    rates_only = [rate for _, rate in quotes]
+    if len(rates_only) > 1:
+        spread = max(rates_only) - min(rates_only)
+        lines.append("")
+        lines.append(f"_Spread across providers: {spread:,.4f} {code}_")
+
+    return "\n".join(lines)
+
+
+def format_missing_input_message(has_country: bool, has_amount: bool) -> str:
     """Reply that lists which piece(s) are still missing."""
     if not has_country and not has_amount:
         return get_rates_prompt()
@@ -224,26 +227,17 @@ async def handle_rates_message(phone: str, text: str | None) -> str:
 
     if country and amount is not None:
         _clear_pending(phone)
-        try:
-            rates = await fetch_usd_rates()
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.error("Failed to fetch FX rates: %s", exc)
+        results = await fetch_all_quotes()
+        if not results:
             return (
-                "Sorry — I couldn't fetch live exchange rates right now. "
+                "Sorry — I couldn't reach any FX provider right now. "
                 "Please try again in a moment."
             )
         code, display = country
-        rate = rates.get(code)
-        if rate is None:
-            return (
-                f"I couldn't find a live rate for {display} ({code}) right now. "
-                "Try a different country?"
-            )
-        return format_quote_message(display, code, amount, rate)
+        return format_quote_message(display, code, amount, results)
 
     _mark_pending(phone)
     return format_missing_input_message(
         has_country=country is not None,
         has_amount=amount is not None,
-        original_text=text,
     )

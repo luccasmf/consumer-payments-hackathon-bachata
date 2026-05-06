@@ -1,31 +1,35 @@
-"""Tests for the FX rates service used by inbound message handling."""
+"""Tests for the rates conversation flow (orchestration over providers)."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from typing import Any
 
-import httpx
 import pytest
 
 from app.services import rates_service
+from app.services.rates_providers.base import FxProviderResult
 
 
-SAMPLE_RATES_PAYLOAD: dict[str, Any] = {
-    "result": "success",
-    "base_code": "USD",
-    "rates": {
-        "USD": 1.0,
-        "MXN": 17.0512,
-        "COP": 3925.4,
-        "GTQ": 7.78,
-        "HNL": 24.65,
-        "DOP": 58.9,
-        "BRL": 5.12,
-        "ARS": 1000.0,
-    },
-}
+def _make_result(name: str, rates: dict[str, float]) -> FxProviderResult:
+    return FxProviderResult(
+        provider=name,
+        base="USD",
+        rates=rates,
+        source_url=f"https://example.test/{name}",
+    )
+
+
+SAMPLE_RESULTS: list[FxProviderResult] = [
+    _make_result(
+        "open.er-api",
+        {"USD": 1.0, "MXN": 17.0512, "COP": 3925.4, "BRL": 5.12},
+    ),
+    _make_result(
+        "exchangerate-api",
+        {"USD": 1.0, "MXN": 17.1100, "COP": 3920.0, "BRL": 5.15},
+    ),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -36,26 +40,13 @@ def _reset_pending_state() -> None:
     rates_service._pending_rates.clear()
 
 
-def _mock_transport(
-    handler: Callable[[httpx.Request], httpx.Response],
-) -> httpx.MockTransport:
-    return httpx.MockTransport(handler)
-
-
-def _stub_fetch(monkeypatch: pytest.MonkeyPatch, rates: dict[str, float]) -> None:
-    async def fake_fetch(*_: Any, **__: Any) -> dict[str, float]:
-        return rates
-
-    monkeypatch.setattr(rates_service, "fetch_usd_rates", fake_fetch)
-
-
-def _stub_fetch_error(
-    monkeypatch: pytest.MonkeyPatch, exc: Exception | None = None
+def _stub_fetch_all(
+    monkeypatch: pytest.MonkeyPatch, results: list[FxProviderResult]
 ) -> None:
-    async def fake_fetch(*_: Any, **__: Any) -> dict[str, float]:
-        raise exc or httpx.ConnectError("network down")
+    async def fake(*_: Any, **__: Any) -> list[FxProviderResult]:
+        return list(results)
 
-    monkeypatch.setattr(rates_service, "fetch_usd_rates", fake_fetch)
+    monkeypatch.setattr(rates_service, "fetch_all_quotes", fake)
 
 
 class TestIsRatesRequest:
@@ -112,52 +103,40 @@ class TestParseCountryAndAmount:
         assert rates_service.parse_country_and_amount(None) == (None, None)
 
 
-class TestFetchUsdRates:
-    def test_returns_rates_dict_on_success(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.host == "open.er-api.com"
-            return httpx.Response(200, json=SAMPLE_RATES_PAYLOAD)
-
-        async def run() -> dict[str, float]:
-            async with httpx.AsyncClient(transport=_mock_transport(handler)) as client:
-                return await rates_service.fetch_usd_rates(client=client)
-
-        rates = asyncio.run(run())
-
-        assert rates["MXN"] == pytest.approx(17.0512)
-        assert rates["COP"] == pytest.approx(3925.4)
-
-    def test_raises_on_http_error(self) -> None:
-        def handler(_: httpx.Request) -> httpx.Response:
-            return httpx.Response(500, text="boom")
-
-        async def run() -> None:
-            async with httpx.AsyncClient(transport=_mock_transport(handler)) as client:
-                await rates_service.fetch_usd_rates(client=client)
-
-        with pytest.raises(httpx.HTTPError):
-            asyncio.run(run())
-
-    def test_raises_value_error_on_malformed_payload(self) -> None:
-        def handler(_: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"result": "error"})
-
-        async def run() -> None:
-            async with httpx.AsyncClient(transport=_mock_transport(handler)) as client:
-                await rates_service.fetch_usd_rates(client=client)
-
-        with pytest.raises(ValueError):
-            asyncio.run(run())
-
-
 class TestFormatQuoteMessage:
-    def test_renders_quote_with_conversion(self) -> None:
-        message = rates_service.format_quote_message("Mexico", "MXN", 250.0, 17.0512)
-        assert "Mexico" in message
+    def test_renders_one_line_per_provider(self) -> None:
+        message = rates_service.format_quote_message(
+            "Mexico", "MXN", 250.0, SAMPLE_RESULTS
+        )
+
+        assert "Quote — Mexico" in message
         assert "250.00 USD" in message
-        assert "MXN" in message
-        # 250 * 17.0512 = 4262.80
+        # Both providers and both conversion totals show up.
+        assert "open.er-api" in message
+        assert "exchangerate-api" in message
+        # 250 * 17.0512 = 4262.80 ; 250 * 17.11 = 4277.50
         assert "4,262.80" in message
+        assert "4,277.50" in message
+        # Spread shown when 2+ providers present.
+        assert "Spread" in message
+
+    def test_skips_providers_missing_target_currency(self) -> None:
+        partial = [
+            _make_result("alpha", {"MXN": 17.0}),
+            _make_result("beta", {"BRL": 5.0}),  # no MXN
+        ]
+        message = rates_service.format_quote_message("Mexico", "MXN", 100.0, partial)
+
+        assert "alpha" in message
+        assert "beta" not in message
+        # With only one quote remaining we shouldn't print a spread line.
+        assert "Spread" not in message
+
+    def test_returns_friendly_message_when_no_provider_has_currency(self) -> None:
+        none_match = [_make_result("alpha", {"BRL": 5.0})]
+        message = rates_service.format_quote_message("Mexico", "MXN", 100.0, none_match)
+
+        assert "couldn't find" in message.lower()
 
 
 class TestHandleRatesMessage:
@@ -166,7 +145,7 @@ class TestHandleRatesMessage:
     def test_initial_request_prompts_for_inputs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_fetch(monkeypatch, SAMPLE_RATES_PAYLOAD["rates"])
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
 
         reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "rates"))
 
@@ -174,10 +153,10 @@ class TestHandleRatesMessage:
         assert "amount" in reply.lower()
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
 
-    def test_followup_with_country_and_amount_returns_quote(
+    def test_followup_with_country_and_amount_returns_multi_quote(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_fetch(monkeypatch, SAMPLE_RATES_PAYLOAD["rates"])
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
         rates_service._mark_pending(self.PHONE)
 
         reply = asyncio.run(
@@ -185,14 +164,14 @@ class TestHandleRatesMessage:
         )
 
         assert "Mexico" in reply
-        assert "250.00 USD" in reply
-        assert "MXN" in reply
+        assert "open.er-api" in reply
+        assert "exchangerate-api" in reply
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
     def test_one_shot_message_with_keyword_country_and_amount(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_fetch(monkeypatch, SAMPLE_RATES_PAYLOAD["rates"])
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
 
         reply = asyncio.run(
             rates_service.handle_rates_message(self.PHONE, "rates Brazil 100")
@@ -205,7 +184,7 @@ class TestHandleRatesMessage:
     def test_followup_missing_amount_reprompts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_fetch(monkeypatch, SAMPLE_RATES_PAYLOAD["rates"])
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
         rates_service._mark_pending(self.PHONE)
 
         reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "Mexico"))
@@ -216,7 +195,7 @@ class TestHandleRatesMessage:
     def test_followup_missing_country_reprompts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_fetch(monkeypatch, SAMPLE_RATES_PAYLOAD["rates"])
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
         rates_service._mark_pending(self.PHONE)
 
         reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "250"))
@@ -224,23 +203,38 @@ class TestHandleRatesMessage:
         assert "country" in reply.lower()
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
 
-    def test_returns_friendly_error_when_fetch_fails(
+    def test_returns_friendly_error_when_all_providers_fail(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_fetch_error(monkeypatch)
+        _stub_fetch_all(monkeypatch, [])
         rates_service._mark_pending(self.PHONE)
 
         reply = asyncio.run(
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
-        assert "couldn't fetch" in reply.lower()
+        assert "couldn't reach" in reply.lower()
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
+
+    def test_partial_provider_failure_still_quotes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Only one provider responded; the reply should still render.
+        _stub_fetch_all(monkeypatch, [SAMPLE_RESULTS[0]])
+        rates_service._mark_pending(self.PHONE)
+
+        reply = asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Mexico 250")
+        )
+
+        assert "open.er-api" in reply
+        assert "exchangerate-api" not in reply
+        assert "Spread" not in reply
 
     def test_handles_unsupported_currency_gracefully(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_fetch(monkeypatch, {"USD": 1.0})
+        _stub_fetch_all(monkeypatch, [_make_result("alpha", {"USD": 1.0})])
         rates_service._mark_pending(self.PHONE)
 
         reply = asyncio.run(
@@ -248,3 +242,19 @@ class TestHandleRatesMessage:
         )
 
         assert "couldn't find" in reply.lower()
+
+
+# Smoke test that an old import path doesn't accidentally come back.
+def test_old_fetch_usd_rates_is_gone() -> None:
+    assert not hasattr(rates_service, "fetch_usd_rates")
+    assert not hasattr(rates_service, "RATES_URL")
+
+
+# Provider import is wired through the service via fetch_all_quotes.
+def test_service_uses_aggregator_indirection() -> None:
+    # Sanity: the module-level binding exists so monkeypatch works.
+    assert callable(rates_service.fetch_all_quotes)
+    # And it's the one from the providers package.
+    from app.services.rates_providers import fetch_all_quotes as agg
+
+    assert rates_service.fetch_all_quotes is agg
