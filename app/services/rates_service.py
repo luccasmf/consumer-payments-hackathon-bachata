@@ -242,7 +242,7 @@ def format_comparison_response(
         (
             f"Today *${response.amount_usd:,.2f} USD* to "
             f"*{response.destination_country}* (*{response.currency_code}*) "
-            f"converts like this — all-in, no surprises:"
+            f"converts like this:"
         ),
         "",
     ]
@@ -263,7 +263,7 @@ def format_comparison_response(
             lines.append(
                 f"{prefix} *{quote.provider}* → "
                 f"*{quote.total_received:,.2f} {response.currency_code}* "
-                "— all-in estimate"
+                "— estimate"
             )
 
     if len(ranked_remittance) >= 2:
