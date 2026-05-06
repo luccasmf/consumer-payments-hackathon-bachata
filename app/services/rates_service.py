@@ -13,6 +13,7 @@ Provider implementations live in :mod:`app.services.rates_providers`.
 
 import logging
 import re
+from dataclasses import dataclass
 
 from app.services.rates_providers import FxProviderResult, fetch_all_quotes
 
@@ -79,10 +80,18 @@ _COUNTRY_ALIASES: dict[str, tuple[str, str]] = {
     "brl": ("BRL", "Brazil"),
 }
 
-# Per-phone-number flag: the user asked for rates and we're waiting on
-# country + amount. In-process only — fine for the hackathon's single
-# Uvicorn worker; swap for Redis/a state store if we ever scale out.
-_pending_rates: dict[str, bool] = {}
+# Per-phone-number partial state: keeps whatever pieces of the rates
+# request the user has supplied so far so we don't lose ``country`` after
+# they answer the "and how much?" follow-up. In-process only — fine for
+# the hackathon's single Uvicorn worker; swap for Redis/a state store if
+# we ever scale out.
+@dataclass
+class _PendingRates:
+    country: tuple[str, str] | None = None
+    amount: float | None = None
+
+
+_pending_rates: dict[str, _PendingRates] = {}
 
 
 def is_rates_request(text: str | None) -> bool:
@@ -95,11 +104,17 @@ def is_rates_request(text: str | None) -> bool:
 
 def is_awaiting_rates_input(phone: str) -> bool:
     """True if we previously prompted this phone for country + amount."""
-    return _pending_rates.get(phone, False)
+    return phone in _pending_rates
 
 
-def _mark_pending(phone: str) -> None:
-    _pending_rates[phone] = True
+def _get_pending(phone: str) -> _PendingRates:
+    """Return (and create if missing) the pending state for ``phone``."""
+    return _pending_rates.setdefault(phone, _PendingRates())
+
+
+def _mark_pending(phone: str) -> _PendingRates:
+    """Ensure a pending entry exists; returns the (possibly new) record."""
+    return _get_pending(phone)
 
 
 def _clear_pending(phone: str) -> None:
@@ -165,8 +180,11 @@ def format_quote_message(
 ) -> str:
     """Render a multi-provider conversion reply.
 
-    Lists each provider that returned a rate for ``code`` so the user can
-    compare quotations side by side.
+    Quotes are sorted best-first (highest target-currency-per-USD = the
+    sender gets more local currency for the same USD), with the winning
+    provider tagged ``🏆 BEST``. When 2+ providers respond we add a
+    summary line showing how much extra the user pockets vs. the worst
+    quote.
     """
     quotes: list[tuple[FxProviderResult, float]] = [
         (r, r.rates[code]) for r in results if code in r.rates
@@ -178,23 +196,40 @@ def format_quote_message(
             "provider right now. Try again in a moment."
         )
 
+    # Best rate = most local currency per USD for the sender.
+    quotes.sort(key=lambda item: item[1], reverse=True)
+    has_comparison = len(quotes) > 1
+    best_result, best_rate = quotes[0]
+
+    header = (
+        "*Provider quotations* (best first):"
+        if has_comparison
+        else "*Provider quotation:*"
+    )
     lines = [
         f"💱 *Quote — {country}*",
         f"Sending {amount:,.2f} USD",
         "",
-        "*Provider quotations:*",
+        header,
     ]
-    for result, rate in quotes:
+    for index, (result, rate) in enumerate(quotes):
         converted = amount * rate
+        # Only award the badge when there's something to compare against.
+        badge = " 🏆 *BEST*" if has_comparison and index == 0 else ""
         lines.append(
             f"• *{result.provider}*: {converted:,.2f} {code} "
-            f"_(1 USD = {rate:,.4f})_"
+            f"_(1 USD = {rate:,.4f})_{badge}"
         )
 
-    rates_only = [rate for _, rate in quotes]
-    if len(rates_only) > 1:
-        spread = max(rates_only) - min(rates_only)
+    if has_comparison:
+        _, worst_rate = quotes[-1]
+        extra = amount * (best_rate - worst_rate)
+        spread = best_rate - worst_rate
         lines.append("")
+        lines.append(
+            f"🏆 Best deal: *{best_result.provider}* — "
+            f"you'd get *{extra:,.2f} {code}* more than the lowest quote."
+        )
         lines.append(f"_Spread across providers: {spread:,.4f} {code}_")
 
     return "\n".join(lines)
@@ -217,15 +252,24 @@ def format_missing_input_message(has_country: bool, has_amount: bool) -> str:
 
 async def handle_rates_message(phone: str, text: str | None) -> str:
     """
-    Drive the two-turn rates conversation.
+    Drive the multi-turn rates conversation.
 
     Call this whenever ``is_rates_request(text)`` matches OR the phone is
-    already in ``is_awaiting_rates_input``. The handler is responsible for
-    flipping the pending flag on/off.
+    already in ``is_awaiting_rates_input``. New ``country`` / ``amount``
+    values from the latest message are *merged* into any state we already
+    collected so the user can supply them across separate messages
+    ("Mexico" → "250") without us re-asking for the first piece.
     """
-    country, amount = parse_country_and_amount(text)
+    new_country, new_amount = parse_country_and_amount(text)
 
-    if country and amount is not None:
+    pending = _get_pending(phone)
+    if new_country is not None:
+        pending.country = new_country
+    if new_amount is not None:
+        pending.amount = new_amount
+
+    if pending.country and pending.amount is not None:
+        country, amount = pending.country, pending.amount
         _clear_pending(phone)
         results = await fetch_all_quotes()
         if not results:
@@ -236,8 +280,7 @@ async def handle_rates_message(phone: str, text: str | None) -> str:
         code, display = country
         return format_quote_message(display, code, amount, results)
 
-    _mark_pending(phone)
     return format_missing_input_message(
-        has_country=country is not None,
-        has_amount=amount is not None,
+        has_country=pending.country is not None,
+        has_amount=pending.amount is not None,
     )
