@@ -131,10 +131,10 @@ def format_comparison_response(
 ) -> str:
     """Render WhatsApp body text from a structured comparison.
 
-    Quotes are sorted *best-first* (highest ``total_received``). Copy is
-    kept short and avoids vendor/API names so non-expert users see amounts
-    first. The top line gets a small *best* marker when multiple quotes exist;
-    the reference feed used for the 7-day chart is labeled *chart*.
+    Quotes are sorted *best-first* (highest ``total_received``). Each line
+    names the provider so users can tell sources apart. When multiple quotes
+    exist, the top line gets a *best* marker; the reference feed used for the
+    7-day chart is labeled *chart*.
     """
     if not response.quotes:
         return (
@@ -166,7 +166,8 @@ def format_comparison_response(
             tags.append("📍 *chart*")
         suffix = (" · " + " · ".join(tags)) if tags else ""
         lines.append(
-            f"• *{quote.total_received:,.2f} {response.currency_code}*{suffix}"
+            f"• *{quote.provider}* · *{quote.total_received:,.2f} "
+            f"{response.currency_code}*{suffix}"
         )
 
     lines.append("")

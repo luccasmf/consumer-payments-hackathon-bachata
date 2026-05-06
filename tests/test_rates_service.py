@@ -162,9 +162,10 @@ class TestFormatQuoteMessage:
         assert "Mexico" in message
         assert "you're sending" in message
         assert "250.00 USD" in message
-        # Both conversion totals show up (no raw provider API names in copy).
         assert "4,262.80" in message
         assert "4,277.50" in message
+        assert "open.er-api" in message
+        assert "exchangerate-api" in message
         assert "Here's what we found" in message
         assert "top quote pays" in message
         assert "2026-05-06 16:44" in message
@@ -177,9 +178,11 @@ class TestFormatQuoteMessage:
 
         provider_lines = [line for line in lines if line.startswith("• ")]
         # 17.11 > 17.0512 → higher MXN total should be first with the badge.
+        assert "exchangerate-api" in provider_lines[0]
         assert "4,277.50" in provider_lines[0]
         assert "🏆" in provider_lines[0]
         assert "best" in provider_lines[0]
+        assert "open.er-api" in provider_lines[1]
         assert "4,262.80" in provider_lines[1]
         assert "🏆" not in provider_lines[1]
 
@@ -196,6 +199,7 @@ class TestFormatQuoteMessage:
         message = rates_service.format_quote_message("Mexico", "MXN", 100.0, partial)
 
         assert "1,700.00" in message
+        assert "alpha" in message
         assert "beta" not in message
         # With only one quote remaining we shouldn't print multi-quote summary lines.
         assert "top quote pays" not in message
