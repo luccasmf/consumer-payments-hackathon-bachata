@@ -260,10 +260,13 @@ def format_comparison_response(
         lines.append("")
         for i, quote in enumerate(ranked_remittance):
             prefix = _rank_number_emoji(i)
+            suffix = " — estimate"
+            if "felix" in quote.provider.lower():
+                suffix = " — estimate, instant via WhatsApp 💬"
             lines.append(
                 f"{prefix} *{quote.provider}* → "
-                f"*{quote.total_received:,.2f} {response.currency_code}* "
-                "— estimate"
+                f"*{quote.total_received:,.2f} {response.currency_code}*"
+                f"{suffix}"
             )
 
     if len(ranked_remittance) >= 2:
