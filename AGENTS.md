@@ -7,7 +7,7 @@ Project context for AI coding agents (Cursor, Claude Code, Codex, etc.) working 
 ## TL;DR
 
 - **What we're building:** A WhatsApp + AI conversational product on top of [Kapso](https://docs.kapso.ai/docs/introduction) (Meta Tech Provider) + FastAPI. **Product vision (Team Bachata):** API that compares FX/remittance quotes across providers — see [`docs/FX Rate Comparison API.md`](docs/FX%20Rate%20Comparison%20API.md). Hackathon constraints remain in `KICKOFF.md`.
-- **Stack:** Python **3.12** (pinned in `.python-version`), FastAPI, Uvicorn, httpx, pydantic-settings, pytest. No DB.
+- **Stack:** Python **3.12** (pinned in `.python-version`), FastAPI, Uvicorn, httpx, pydantic-settings, pytest, Playwright (Monito compare). **Optional** Upstash Redis (`REDIS_URL` / `REDIS_TOKEN` in `.env`) for caching FX history — no SQL database.
 - **Deadline:** Wed May 6, **3 PM code freeze**, demos 3:30 PM, awards 4:30 PM (see `KICKOFF.md`).
 - **Where we coordinate:** Bachata team Slack group DM → [felix-pago.slack.com/archives/C0B1XAGP0RK](https://felix-pago.slack.com/archives/C0B1XAGP0RK).
 - **Team branch:** `team-bachata`. Members:
@@ -44,30 +44,44 @@ cp .env.example .env                 # then fill Kapso sandbox values
 
 ---
 
-## Repo map (the 6 files you actually edit)
+## Repo map (where work usually lands)
 
 ```
 app/
-├── main.py                  # FastAPI app, CORS, router wiring. Rarely touched.
-├── config.py                # pydantic-settings .env loader. Add new env vars here.
-├── bot.py                   # ⭐ inbound conversation logic. THIS is where most LLM/feature work goes.
-├── send_demo_message.py     # one-off outbound CLI (`python -m app.send_demo_message --to +1...`).
+├── main.py                         # FastAPI app, CORS, router wiring. Rarely touched.
+├── config.py                       # pydantic-settings .env loader (Kapso, Redis, etc.).
+├── bot.py                          # ⭐ inbound routing: help, FX/rates flow, demo echo.
+├── send_demo_message.py            # one-off outbound CLI (`python -m app.send_demo_message --to +1...`).
 ├── routers/
-│   ├── health.py            # GET /health
-│   ├── webhooks.py          # GET/POST /webhooks/whatsapp + signature verification
-│   └── api.py               # POST /api/send-text, GET /api/kapso/account (smoke-tests API key)
+│   ├── health.py                   # GET /health
+│   ├── webhooks.py                 # GET/POST /webhooks/whatsapp + signature verification
+│   └── api.py                      # POST /api/send-text, GET /api/kapso/account, POST /api/monito/compare
 ├── services/
-│   └── kapso_client.py      # ⭐ HTTP client; helpers for text / template / media / interactive buttons / cta_url / location_request
+│   ├── kapso_client.py             # ⭐ HTTP client: text / template / media / buttons / cta_url / location_request
+│   ├── redis_client.py             # Optional Upstash Redis wrapper (used when `REDIS_*` set).
+│   ├── rates_service.py            # ⭐ FX comparison orchestration, parsing, formatting, conversation state.
+│   ├── rates_history.py            # Historical rate series + chart URL helpers.
+│   ├── monito_playwright_service.py # Playwright scrape for POST /api/monito/compare (needs `playwright install chromium`).
+│   ├── monito_compare.py           # Supporting logic for Monito comparison data.
+│   └── rates_providers/            # Per-provider fetchers (Felix public API, Monito API, OpenExchangeRates, …).
 └── schemas/
-    ├── messages.py          # SendTextRequest / MessageResponse
+    ├── messages.py                 # SendTextRequest / MessageResponse
+    ├── fx_comparison.py           # FX comparison / quote models
+    ├── monito.py                   # MonitoCompareRequest, etc.
     ├── health.py
-    └── kapso/               # KapsoMessage / KapsoConversation / KapsoWebhook (extra="allow" — Kapso may add fields)
-tests/test_app.py            # in-process TestClient, no network, no Kapso credentials needed
-docs/                        # product notes (e.g. Bachata FX comparison vision)
-.cursor/rules/               # always-on setup rule for non-technical teammates
+    └── kapso/                      # Kapso payloads (extra="allow")
+tests/
+├── test_app.py                     # App wiring + API routes (no Kapso credentials).
+├── test_bot.py                     # Bot routing and messaging behavior.
+├── test_rates_service.py           # Rates flow and formatting.
+├── test_rates_providers.py         # Provider adapters.
+├── test_rates_history.py           # History / chart helpers.
+└── test_redis_client.py            # Redis client (mocked / optional).
+docs/                               # product notes (e.g. Bachata FX comparison vision)
+.cursor/rules/                      # always-on setup rule for non-technical teammates
 ```
 
-When in doubt: **edit `app/bot.py`** for behavior, **`app/services/kapso_client.py`** for new send capabilities, **`app/config.py`** for new secrets/env vars.
+When in doubt: **`app/bot.py`** for inbound UX and hand-offs; **`app/services/rates_service.py`** (and **`rates_providers/`**) for FX comparison logic; **`app/services/kapso_client.py`** for new WhatsApp send capabilities; **`app/config.py`** for new env vars.
 
 ---
 
@@ -92,6 +106,7 @@ The FastAPI app does not need this variable to run; it exists so humans and agen
 | Expose to Kapso (terminal 2) | `ngrok http 8000` → copy `https://...` host, set webhook to `https://<host>/webhooks/whatsapp` |
 | Health check | `curl -s http://127.0.0.1:8000/health` |
 | API key smoke test | `curl -s http://127.0.0.1:8000/api/kapso/account` |
+| Monito compare (slow; needs Chromium) | `POST /api/monito/compare` — see Swagger `/docs` |
 | One-off outbound (no ngrok) | `python -m app.send_demo_message --to "+1XXXXXXXXXX"` |
 | Run tests | `pytest -q` (or `.venv/bin/python -m pytest -q`) |
 | Swagger UI | http://127.0.0.1:8000/docs |
@@ -122,11 +137,13 @@ WhatsApp user → Kapso → POST https://<ngrok>/webhooks/whatsapp
       ├── parse into KapsoWebhook (app/schemas/kapso/webhook.py)
       ├── ignore if msg.direction != "inbound"
       └── await handle_inbound(msg, KapsoClient())   ← app/bot.py
-              └── inbound_text(msg)                  # extracts text / button / list / kapso.content
-              └── client.send_whatsapp_message(...)  # current demo: echoes back
+              ├── help keywords → HELP_MESSAGE
+              ├── rates / awaiting FX input → await handle_rates_message(...) ← rates_service.py
+              │     (optional chart image via send_media_message)
+              └── else → _reply_body_for_demo(...) → send_whatsapp_message (demo echo)
 ```
 
-To plug in an LLM, replace `_reply_body_for_demo(...)` in `app/bot.py` with your prompt/tool-calling logic. Keep the function `async`. Don't block the webhook — Kapso retries on timeout.
+To extend behavior beyond the built-in FX comparison flow, adjust routing in `handle_inbound` or replace `_reply_body_for_demo(...)` with LLM / tool-calling logic. Keep handlers `async`. Don't block the webhook — Kapso retries on timeout.
 
 ---
 
