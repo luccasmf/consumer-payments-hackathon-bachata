@@ -131,10 +131,10 @@ def format_comparison_response(
 ) -> str:
     """Render WhatsApp body text from a structured comparison.
 
-    Quotes are sorted *best-first* (highest ``total_received``). The top
-    line carries a ``🏆 *BEST*`` badge when there's something to compare
-    against, and any quote from the base / reference provider gets a
-    ``📍 *base*`` tag. Multiple tags can coexist on the same line.
+    Quotes are sorted *best-first* (highest ``total_received``). Copy is
+    kept short and avoids vendor/API names so non-expert users see amounts
+    first. The top line gets a small *best* marker when multiple quotes exist;
+    the reference feed used for the 7-day chart is labeled *chart*.
     """
     if not response.quotes:
         return (
@@ -148,49 +148,45 @@ def format_comparison_response(
     has_comparison = len(sorted_quotes) > 1
     best = sorted_quotes[0]
 
-    header = (
-        "*Provider quotations* (best first):"
+    subhead = (
+        "*Here's what we found (best first):*"
         if has_comparison
-        else "*Provider quotation:*"
+        else "*Estimated arrival:*"
     )
     lines = [
-        f"💱 *Quote — {response.destination_country}*",
-        f"Sending {response.amount_usd:,.2f} USD",
+        f"💱 *{response.destination_country}* · you're sending *{response.amount_usd:,.2f} USD*",
         "",
-        header,
+        subhead,
     ]
     for index, quote in enumerate(sorted_quotes):
-        # Tags appended to a provider line. Multiple can coexist (e.g. the
-        # base provider also being the BEST quote on a given day).
         tags: list[str] = []
         if has_comparison and index == 0:
-            tags.append("🏆 *BEST*")
+            tags.append("🏆 *best*")
         if quote.is_base:
-            tags.append("📍 *base*")
-        suffix = (" " + " ".join(tags)) if tags else ""
+            tags.append("📍 *chart*")
+        suffix = (" · " + " · ".join(tags)) if tags else ""
         lines.append(
-            f"• *{quote.provider}*: {quote.total_received:,.2f} {response.currency_code} "
-            f"_(1 USD = {quote.rate_per_usd:,.4f})_{suffix}"
+            f"• *{quote.total_received:,.2f} {response.currency_code}*{suffix}"
         )
 
+    lines.append("")
+    lines.append(
+        f"_About *{best.rate_per_usd:,.2f} {response.currency_code}* per US dollar "
+        f"(best quote)._"
+    )
+
     if has_comparison:
-        worst = sorted_quotes[-1]
-        # Prefer numbers carried on the response (server-computed); fall
-        # back to recomputing from the quotes if a cached entry doesn't
-        # have them set yet.
         spread_rate = response.spread_rate
         if spread_rate is None:
+            worst = sorted_quotes[-1]
             spread_rate = best.rate_per_usd - worst.rate_per_usd
         extra = response.advantage_vs_worst
         if extra is None:
             extra = response.amount_usd * spread_rate
         lines.append("")
         lines.append(
-            f"🏆 Best deal: *{best.provider}* — "
-            f"you'd get *{extra:,.2f} {response.currency_code}* more than the lowest quote."
-        )
-        lines.append(
-            f"_Spread across providers: {spread_rate:,.4f} {response.currency_code}_"
+            f"🏆 The top quote pays about *{extra:,.2f} {response.currency_code}* "
+            f"more than the lowest — usually small day-to-day noise, not a fee."
         )
 
     ts = response.timestamp
