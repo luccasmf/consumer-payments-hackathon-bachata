@@ -15,6 +15,9 @@ class OpenErApiProvider(FxProvider):
     name = "open.er-api"
     source_url = "https://open.er-api.com"
     base = "USD"
+    # Project-wide reference provider. Charts and "as of" labels anchor
+    # on this one; secondary providers compare against it.
+    is_base = True
 
     URL = "https://open.er-api.com/v6/latest/USD"
 

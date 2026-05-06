@@ -15,12 +15,18 @@ import httpx
 
 @dataclass(frozen=True)
 class FxProviderResult:
-    """Successful response from a single FX provider."""
+    """Successful response from a single FX provider.
+
+    ``is_base`` marks the provider treated as the project's reference /
+    canonical quote (currently ``open.er-api``). Anything we plot, audit,
+    or compare against uses the base provider as the anchor.
+    """
 
     provider: str
     base: str
     rates: dict[str, float]
     source_url: str | None = None
+    is_base: bool = False
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -35,6 +41,11 @@ class FxProvider(ABC):
 
     #: Base currency the implementation returns rates against.
     base: str = "USD"
+
+    #: Set to ``True`` on the project's *reference* provider. The chart and
+    #: any "as of" labels use this one as the anchor. Exactly one provider
+    #: should set this; the rest stay ``False``.
+    is_base: bool = False
 
     @abstractmethod
     async def fetch(self, client: httpx.AsyncClient) -> dict[str, float]:
@@ -62,4 +73,5 @@ class FxProvider(ABC):
             base=self.base,
             rates=rates,
             source_url=self.source_url,
+            is_base=self.is_base,
         )
