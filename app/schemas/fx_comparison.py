@@ -13,6 +13,10 @@ class FxProviderQuote(BaseModel):
     provider: str = Field(description="Provider display name")
     total_received: float = Field(description="Destination currency received for amount_usd")
     rate_per_usd: float = Field(description="Destination units per 1 USD")
+    is_base: bool = Field(
+        default=False,
+        description="True if this quote came from the project's reference / base provider",
+    )
 
 
 class FxComparisonResponse(BaseModel):

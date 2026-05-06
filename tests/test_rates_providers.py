@@ -52,6 +52,8 @@ class TestOpenErApiProvider:
         assert result.base == "USD"
         assert result.rates["MXN"] == pytest.approx(17.05)
         assert result.source_url == "https://open.er-api.com"
+        # The reference / base provider is open.er-api.
+        assert result.is_base is True
 
     def test_raises_on_http_error(self) -> None:
         def handler(_: httpx.Request) -> httpx.Response:
@@ -96,6 +98,8 @@ class TestExchangeRateApiProvider:
 
         assert result.provider == "exchangerate-api"
         assert result.rates["BRL"] == pytest.approx(5.15)
+        # Secondary provider — not flagged as the base.
+        assert result.is_base is False
 
     def test_raises_value_error_on_malformed_payload(self) -> None:
         def handler(_: httpx.Request) -> httpx.Response:
@@ -164,6 +168,17 @@ class TestFetchAllQuotes:
         results = asyncio.run(fetch_all_quotes(providers=providers))
 
         assert results == []
+
+    def test_base_provider_is_open_er_api_and_first(self) -> None:
+        # BASE_PROVIDER and the head of the registry must be the same
+        # OpenErApiProvider instance so anything anchoring on "results[0]"
+        # matches anything anchoring on BASE_PROVIDER.
+        assert rates_providers.BASE_PROVIDER is rates_providers.PROVIDERS[0]
+        assert isinstance(rates_providers.BASE_PROVIDER, OpenErApiProvider)
+        assert rates_providers.BASE_PROVIDER.is_base is True
+        # And the secondary providers don't claim to be base.
+        for provider in rates_providers.PROVIDERS[1:]:
+            assert provider.is_base is False
 
     def test_default_uses_module_providers_list(self) -> None:
         assert isinstance(rates_providers.PROVIDERS, list)

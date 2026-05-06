@@ -87,10 +87,22 @@ async def handle_inbound(msg: KapsoMessage, client: KapsoClient) -> None:
     text = inbound_text(msg)
 
     if is_help_request(text):
-        body = HELP_MESSAGE
-    elif is_rates_request(text) or is_awaiting_rates_input(msg.phone_number):
-        body = await handle_rates_message(msg.phone_number, text)
-    else:
-        body = _reply_body_for_demo(text, msg.type)
+        await client.send_whatsapp_message(msg.phone_number, HELP_MESSAGE)
+        return
 
+    if is_rates_request(text) or is_awaiting_rates_input(msg.phone_number):
+        reply = await handle_rates_message(msg.phone_number, text)
+        if reply.chart_url:
+            # Image with the quote text as caption — single, cohesive WhatsApp message.
+            await client.send_media_message(
+                msg.phone_number,
+                "image",
+                reply.chart_url,
+                caption=reply.body,
+            )
+        else:
+            await client.send_whatsapp_message(msg.phone_number, reply.body)
+        return
+
+    body = _reply_body_for_demo(text, msg.type)
     await client.send_whatsapp_message(msg.phone_number, body)

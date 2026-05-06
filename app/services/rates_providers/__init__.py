@@ -22,9 +22,15 @@ from .open_er_api import OpenErApiProvider
 
 logger = logging.getLogger(__name__)
 
+# Project-wide reference / canonical provider. Anything historical (the
+# 7-day chart, "as of" label, baseline comparisons) anchors on this one.
+BASE_PROVIDER: FxProvider = OpenErApiProvider()
+
 # Order matters: results are returned (and rendered) in this order.
+# The base provider must come first so it's the natural anchor for
+# downstream consumers that pick ``results[0]``.
 PROVIDERS: list[FxProvider] = [
-    OpenErApiProvider(),
+    BASE_PROVIDER,
     ExchangeRateApiProvider(),
 ]
 
@@ -53,6 +59,7 @@ async def fetch_all_quotes(
 
 
 __all__ = [
+    "BASE_PROVIDER",
     "ExchangeRateApiProvider",
     "FxProvider",
     "FxProviderResult",

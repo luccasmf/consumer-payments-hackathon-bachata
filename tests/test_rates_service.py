@@ -14,12 +14,15 @@ from app.services import rates_service
 from app.services.rates_providers.base import FxProviderResult
 
 
-def _make_result(name: str, rates: dict[str, float]) -> FxProviderResult:
+def _make_result(
+    name: str, rates: dict[str, float], *, is_base: bool = False
+) -> FxProviderResult:
     return FxProviderResult(
         provider=name,
         base="USD",
         rates=rates,
         source_url=f"https://example.test/{name}",
+        is_base=is_base,
     )
 
 
@@ -27,6 +30,7 @@ SAMPLE_RESULTS: list[FxProviderResult] = [
     _make_result(
         "open.er-api",
         {"USD": 1.0, "MXN": 17.0512, "COP": 3925.4, "BRL": 5.12},
+        is_base=True,
     ),
     _make_result(
         "exchangerate-api",
@@ -44,15 +48,36 @@ def _reset_pending_state() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _disable_redis_cache(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+def _disable_redis_cache(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Avoid real Redis from `.env` except in :class:`TestFxRedisCache` (explicit mocks)."""
-    if request.node.get_closest_marker("redis_cache") or "TestFxRedisCache" in request.node.nodeid:
+    if (
+        request.node.get_closest_marker("redis_cache")
+        or "TestFxRedisCache" in request.node.nodeid
+    ):
         return
     monkeypatch.setattr(
         rates_service,
         "get_redis_storage_client",
         lambda *_a, **_k: None,
     )
+
+
+@pytest.fixture(autouse=True)
+def _stub_chart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Default: pretend the chart pipeline returned nothing. Tests that
+    actually want to assert chart-URL behavior override this with their
+    own ``monkeypatch.setattr`` call (it wins because pytest applies the
+    most-recent setattr last). Applies to all tests, including the
+    Redis-cache class — chart fetching is independent of caching.
+    """
+
+    async def fake(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(rates_service, "get_history_chart_url", fake)
 
 
 def _stub_fetch_all(
@@ -62,6 +87,13 @@ def _stub_fetch_all(
         return list(results)
 
     monkeypatch.setattr(rates_service, "fetch_all_quotes", fake)
+
+
+def _stub_chart_url(monkeypatch: pytest.MonkeyPatch, url: str | None) -> None:
+    async def fake(*_: Any, **__: Any) -> str | None:
+        return url
+
+    monkeypatch.setattr(rates_service, "get_history_chart_url", fake)
 
 
 class TestIsRatesRequest:
@@ -180,6 +212,35 @@ class TestFormatQuoteMessage:
 
         assert "couldn't find" in message.lower()
 
+    def test_labels_base_provider(self) -> None:
+        message = rates_service.format_quote_message(
+            "Mexico", "MXN", 250.0, SAMPLE_RESULTS
+        )
+        provider_lines = [line for line in message.splitlines() if line.startswith("• ")]
+
+        # open.er-api is our base → that line carries the "base" tag.
+        base_line = next(line for line in provider_lines if "open.er-api" in line)
+        secondary_line = next(
+            line for line in provider_lines if "exchangerate-api" in line
+        )
+        assert "📍" in base_line
+        assert "base" in base_line
+        assert "📍" not in secondary_line
+
+    def test_base_and_best_can_coexist_on_same_line(self) -> None:
+        # Flip the rates so the base provider is also the best.
+        results = [
+            _make_result("open.er-api", {"MXN": 17.5}, is_base=True),
+            _make_result("exchangerate-api", {"MXN": 17.0}),
+        ]
+        message = rates_service.format_quote_message("Mexico", "MXN", 100.0, results)
+        first_line = next(
+            line for line in message.splitlines() if line.startswith("• ")
+        )
+        assert "open.er-api" in first_line
+        assert "BEST" in first_line
+        assert "base" in first_line
+
 
 class TestHandleRatesMessage:
     PHONE = "+15551234567"
@@ -191,8 +252,9 @@ class TestHandleRatesMessage:
 
         reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "rates"))
 
-        assert "country" in reply.lower()
-        assert "amount" in reply.lower()
+        assert reply.chart_url is None
+        assert "country" in reply.body.lower()
+        assert "amount" in reply.body.lower()
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
 
     def test_followup_with_country_and_amount_returns_multi_quote(
@@ -205,9 +267,9 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
-        assert "Mexico" in reply
-        assert "open.er-api" in reply
-        assert "exchangerate-api" in reply
+        assert "Mexico" in reply.body
+        assert "open.er-api" in reply.body
+        assert "exchangerate-api" in reply.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
     def test_one_shot_message_with_keyword_country_and_amount(
@@ -219,8 +281,8 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "rates Brazil 100")
         )
 
-        assert "Brazil" in reply
-        assert "BRL" in reply
+        assert "Brazil" in reply.body
+        assert "BRL" in reply.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
     def test_followup_missing_amount_reprompts(
@@ -231,7 +293,7 @@ class TestHandleRatesMessage:
 
         reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "Mexico"))
 
-        assert "USD" in reply
+        assert "USD" in reply.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
 
     def test_followup_missing_country_reprompts(
@@ -242,7 +304,7 @@ class TestHandleRatesMessage:
 
         reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "250"))
 
-        assert "country" in reply.lower()
+        assert "country" in reply.body.lower()
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
 
     def test_split_turns_country_then_amount(
@@ -251,20 +313,17 @@ class TestHandleRatesMessage:
         """User sends country first, then the amount in a separate message."""
         _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
 
-        # Turn 1: trigger.
         asyncio.run(rates_service.handle_rates_message(self.PHONE, "rates"))
-        # Turn 2: country only.
         reply2 = asyncio.run(
             rates_service.handle_rates_message(self.PHONE, "Mexico")
         )
-        assert "USD" in reply2  # asks for the amount
+        assert "USD" in reply2.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
 
-        # Turn 3: amount only — must NOT re-ask for the country.
         reply3 = asyncio.run(rates_service.handle_rates_message(self.PHONE, "250"))
-        assert "Quote — Mexico" in reply3
-        assert "MXN" in reply3
-        assert "open.er-api" in reply3
+        assert "Quote — Mexico" in reply3.body
+        assert "MXN" in reply3.body
+        assert "open.er-api" in reply3.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
     def test_split_turns_amount_then_country(
@@ -276,14 +335,14 @@ class TestHandleRatesMessage:
         asyncio.run(rates_service.handle_rates_message(self.PHONE, "rates"))
 
         reply2 = asyncio.run(rates_service.handle_rates_message(self.PHONE, "250"))
-        assert "country" in reply2.lower()
+        assert "country" in reply2.body.lower()
         assert rates_service.is_awaiting_rates_input(self.PHONE) is True
 
         reply3 = asyncio.run(
             rates_service.handle_rates_message(self.PHONE, "Mexico")
         )
-        assert "Quote — Mexico" in reply3
-        assert "250.00 USD" in reply3
+        assert "Quote — Mexico" in reply3.body
+        assert "250.00 USD" in reply3.body
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
     def test_new_value_overrides_previous_pending(
@@ -293,13 +352,12 @@ class TestHandleRatesMessage:
         _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
 
         asyncio.run(rates_service.handle_rates_message(self.PHONE, "rates Mexico"))
-        # User changes the country before specifying the amount.
         asyncio.run(rates_service.handle_rates_message(self.PHONE, "Brazil"))
         reply = asyncio.run(rates_service.handle_rates_message(self.PHONE, "100"))
 
-        assert "Quote — Brazil" in reply
-        assert "Mexico" not in reply
-        assert "BRL" in reply
+        assert "Quote — Brazil" in reply.body
+        assert "Mexico" not in reply.body
+        assert "BRL" in reply.body
 
     def test_returns_friendly_error_when_all_providers_fail(
         self, monkeypatch: pytest.MonkeyPatch
@@ -311,13 +369,13 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
-        assert "couldn't reach" in reply.lower()
+        assert "couldn't reach" in reply.body.lower()
+        assert reply.chart_url is None
         assert rates_service.is_awaiting_rates_input(self.PHONE) is False
 
     def test_partial_provider_failure_still_quotes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Only one provider responded; the reply should still render.
         _stub_fetch_all(monkeypatch, [SAMPLE_RESULTS[0]])
         rates_service._mark_pending(self.PHONE)
 
@@ -325,9 +383,9 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
-        assert "open.er-api" in reply
-        assert "exchangerate-api" not in reply
-        assert "Spread" not in reply
+        assert "open.er-api" in reply.body
+        assert "exchangerate-api" not in reply.body
+        assert "Spread" not in reply.body
 
     def test_handles_unsupported_currency_gracefully(
         self, monkeypatch: pytest.MonkeyPatch
@@ -339,7 +397,35 @@ class TestHandleRatesMessage:
             rates_service.handle_rates_message(self.PHONE, "Mexico 250")
         )
 
-        assert "couldn't find" in reply.lower()
+        assert "couldn't find" in reply.body.lower()
+
+    def test_attaches_chart_url_when_history_pipeline_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
+        _stub_chart_url(monkeypatch, "https://quickchart.io/chart?c=...&w=600")
+        rates_service._mark_pending(self.PHONE)
+
+        reply = asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Mexico 250")
+        )
+
+        assert reply.chart_url == "https://quickchart.io/chart?c=...&w=600"
+        assert "Quote — Mexico" in reply.body
+
+    def test_no_chart_url_when_history_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_all(monkeypatch, SAMPLE_RESULTS)
+        _stub_chart_url(monkeypatch, None)
+        rates_service._mark_pending(self.PHONE)
+
+        reply = asyncio.run(
+            rates_service.handle_rates_message(self.PHONE, "Mexico 250")
+        )
+
+        assert reply.chart_url is None
+        assert "Quote — Mexico" in reply.body
 
 
 # Smoke test that an old import path doesn't accidentally come back.
@@ -387,7 +473,7 @@ class TestFxRedisCache:
         )
 
         assert calls == []
-        assert "(cached)" in reply
+        assert "(cached)" in reply.body
         mock_redis.save.assert_not_called()
 
     def test_stale_cache_deleted_and_refetches(
