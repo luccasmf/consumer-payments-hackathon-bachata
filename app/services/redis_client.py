@@ -44,6 +44,15 @@ class RedisStorageClient:
             kwargs["ex"] = ttl_seconds
         await self._redis.set(key, payload, **kwargs)
 
+    async def get(self, key: str) -> str | None:
+        """Return the string value at ``key``, or ``None`` if missing."""
+        raw = await self._redis.get(key)
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            return raw.decode()
+        return str(raw)
+
     async def save_dict(
         self,
         key: str,

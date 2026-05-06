@@ -51,6 +51,32 @@ class TestRedisStorageClient:
 
         mock_redis.set.assert_awaited_once_with("k", "v", ex=60)
 
+    def test_get_returns_string_or_none(self) -> None:
+        mock_redis = MagicMock()
+        mock_redis.get = AsyncMock(side_effect=["value", None])
+
+        with patch("app.services.redis_client.Redis", return_value=mock_redis):
+            client = RedisStorageClient(url="https://example.upstash.io", token="t")
+
+        async def _run() -> tuple[str | None, str | None]:
+            first = await client.get("a")
+            second = await client.get("b")
+            return first, second
+
+        assert asyncio.run(_run()) == ("value", None)
+
+    def test_get_decodes_bytes(self) -> None:
+        mock_redis = MagicMock()
+        mock_redis.get = AsyncMock(return_value=b"bytes-value")
+
+        with patch("app.services.redis_client.Redis", return_value=mock_redis):
+            client = RedisStorageClient(url="https://example.upstash.io", token="t")
+
+        async def _run() -> str | None:
+            return await client.get("k")
+
+        assert asyncio.run(_run()) == "bytes-value"
+
     @pytest.mark.parametrize(
         ("timestamp_key", "expected_ts_field"),
         [
